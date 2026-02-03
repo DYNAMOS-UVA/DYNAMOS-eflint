@@ -1,0 +1,93 @@
+@startuml Request Approval Sequence Diagram
+!theme cerulean
+
+title DYNAMOS - Request Approval Flow Sequence Diagram
+
+actor "Data Analyst" as Client
+participant "API Gateway" as APIGateway
+queue "RabbitMQ\npolicyEnforcer-in" as MQ_PE
+participant "Policy Enforcer" as PolicyEnforcer
+database "etcd" as etcd
+queue "RabbitMQ\norchestrator-in" as MQ_Orch
+participant "Orchestrator" as Orchestrator
+queue "RabbitMQ\napi-gateway-in" as MQ_API
+queue "RabbitMQ\n{agent}-in" as MQ_Agent
+participant "Agent(s)" as Agents
+
+== Request Initiation ==
+Client -> APIGateway: HTTP POST /api/v1/requestApproval\n{type, user, dataProviders, dataRequest}
+activate APIGateway
+
+APIGateway -> APIGateway: Parse request\nCreate RequestApproval proto\nStore channel in requestApprovalMap
+
+APIGateway ->> MQ_PE: SendRequestApproval\ntype: "requestApproval"\ndestination: "policyEnforcer-in"
+
+== Policy Validation ==
+MQ_PE -> PolicyEnforcer: Consume message
+activate PolicyEnforcer
+
+loop For each dataProvider (steward)
+    PolicyEnforcer -> etcd: GET /policyEnforcer/agreements/{steward}
+    etcd --> PolicyEnforcer: Agreement JSON
+    
+    alt Agreement exists & user has relation
+        PolicyEnforcer -> PolicyEnforcer: Match archetypes\nMatch compute providers
+        PolicyEnforcer -> PolicyEnforcer: Add to ValidDataproviders
+    else No agreement or no user relation
+        PolicyEnforcer -> PolicyEnforcer: Add to InvalidDataproviders
+    end
+end
+
+PolicyEnforcer -> PolicyEnforcer: Set RequestApproved\nGenerate Auth token
+
+PolicyEnforcer ->> MQ_Orch: SendValidationResponse\ntype: "validationResponse"\ndestination: "orchestrator-in" (hardcoded)
+deactivate PolicyEnforcer
+
+== Orchestration ==
+MQ_Orch -> Orchestrator: Consume message
+activate Orchestrator
+
+loop For each ValidDataprovider
+    Orchestrator -> etcd: GET /agents/online/{provider}
+    etcd --> Orchestrator: AgentDetails (if online)
+end
+
+alt Authorized providers exist
+    Orchestrator -> Orchestrator: chooseArchetype()
+    Orchestrator -> etcd: GET /archetypes/{archetype}
+    etcd --> Orchestrator: Archetype config
+    
+    Orchestrator -> Orchestrator: Generate jobName
+    
+    alt computeToData archetype
+        loop For each authorized provider
+            Orchestrator ->> MQ_Agent: SendCompositionRequest\nrole: "all"
+        end
+    else dataThroughTtp archetype
+        loop For each data provider
+            Orchestrator ->> MQ_Agent: SendCompositionRequest\nrole: "dataProvider"
+        end
+        Orchestrator ->> MQ_Agent: SendCompositionRequest to TTP\nrole: "computeProvider"
+    end
+    
+    Orchestrator ->> MQ_API: SendRequestApprovalResponse\n{authorizedProviders, jobId, auth}
+else No authorized providers
+    Orchestrator ->> MQ_API: SendRequestApprovalResponse\n{error: "no providers found"}
+end
+deactivate Orchestrator
+
+== Response Handling ==
+MQ_API -> APIGateway: Consume message
+APIGateway -> APIGateway: Route to waiting channel
+
+APIGateway -> APIGateway: Add requestMetadata\nAdd trace context
+
+loop For each authorizedProvider
+    APIGateway -> Agents: HTTP POST /agent/v1/{type}/{target}\n{dataRequest with metadata}
+    Agents --> APIGateway: Response
+end
+
+APIGateway --> Client: HTTP 200\n{jobId, responses[]}
+deactivate APIGateway
+
+@enduml

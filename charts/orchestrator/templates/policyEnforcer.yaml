@@ -17,7 +17,6 @@ spec:
       containers:
       - name: policy-enforcer
         image: {{ .Values.dockerArtifactAccount }}/policy-enforcer:{{ .Values.branchNameTag }}
-        imagePullPolicy: Always
         env:
         - name: OC_AGENT_HOST
           value: {{ .Values.tracingEndpoint }}
@@ -29,7 +28,6 @@ spec:
 
       - name: sidecar
         image: {{ .Values.dockerArtifactAccount }}/sidecar:{{ .Values.branchNameTag }}
-        imagePullPolicy: Always
         env:
         - name: AMQ_PASSWORD
           valueFrom:

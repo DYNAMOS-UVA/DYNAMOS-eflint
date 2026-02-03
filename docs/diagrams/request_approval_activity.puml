@@ -1,0 +1,114 @@
+@startuml Request Approval Activity Diagram
+!theme cerulean
+
+title DYNAMOS - Request Approval Activity Diagram
+
+start
+
+:Data Analyst sends\nHTTP POST request;
+
+partition "API Gateway" {
+    :Parse HTTP request body;
+    :Create RequestApproval protobuf;
+    :Store response channel\nin requestApprovalMap;
+    :Send to RabbitMQ\n(policyEnforcer-in);
+}
+
+partition "Policy Enforcer" {
+    :Receive requestApproval message;
+    
+    :Initialize ValidationResponse;
+    
+    while (More data providers?) is (yes)
+        :Get next steward;
+        :Query etcd for agreement\n(/policyEnforcer/agreements/{steward});
+        
+        if (Agreement exists?) then (yes)
+            :Get user relation from agreement;
+            
+            if (User in relations?) then (yes)
+                :Match user archetypes\nwith agreement archetypes;
+                
+                if (Matching archetypes?) then (yes)
+                    :Add to ValidDataproviders;
+                    :Store matched archetypes;
+                    :Store compute providers;
+                    :Add agreement to list;
+                else (no)
+                    :Add to InvalidDataproviders;
+                endif
+            else (no)
+                :Add to InvalidDataproviders;
+            endif
+        else (no)
+            :Add to InvalidDataproviders;
+        endif
+    endwhile (no)
+    
+    if (ValidDataproviders > 0?) then (yes)
+        :Set RequestApproved = true;
+    else (no)
+        :Set RequestApproved = false;
+    endif
+    
+    :Generate Auth token;
+    :Send ValidationResponse\n(to orchestrator-in);
+}
+
+partition "Orchestrator" {
+    :Receive validationResponse message;
+    
+    :Initialize RequestApprovalResponse;
+    
+    while (More valid providers?) is (yes)
+        :Query etcd for agent online status\n(/agents/online/{provider});
+        
+        if (Agent online?) then (yes)
+            :Add to authorizedProviders;
+        endif
+    endwhile (no)
+    
+    if (authorizedProviders > 0?) then (yes)
+        :Choose optimal archetype;
+        :Get archetype config from etcd;
+        :Generate job name;
+        
+        if (computeToData?) then (yes)
+            :Send CompositionRequest\n(role=all) to each provider;
+        else (dataThroughTtp)
+            :Send CompositionRequest\n(role=dataProvider) to data providers;
+            :Choose TTP compute provider;
+            :Send CompositionRequest\n(role=computeProvider) to TTP;
+        endif
+        
+        :Build success response\nwith authorizedProviders, jobId;
+    else (no)
+        :Build error response;
+    endif
+    
+    :Send RequestApprovalResponse\n(to api-gateway-in);
+}
+
+partition "API Gateway (Response)" {
+    :Receive requestApprovalResponse;
+    :Route to waiting channel;
+    
+    if (Request approved?) then (yes)
+        :Add requestMetadata to dataRequest;
+        :Add trace context;
+        
+        while (More authorized providers?) is (yes)
+            :Send HTTP POST to agent\n/agent/v1/{type}/{target};
+            :Collect response;
+        endwhile (no)
+        
+        :Aggregate responses;
+        :Return HTTP 200 with\njobId and responses;
+    else (no)
+        :Return HTTP error;
+    endif
+}
+
+stop
+
+@enduml
