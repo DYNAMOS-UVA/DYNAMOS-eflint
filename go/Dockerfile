@@ -37,5 +37,8 @@ WORKDIR /app/
 # Copy the pre-built binary from the previous stage
 COPY --from=builder /go/bin/$NAME .
 
+# Basic healthcheck: ensure the service process is running
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD /bin/sh -c "ps | grep -q \"[\\/]app/$NAME\""
+
 # Start the application
 CMD ["/bin/sh", "-c", "/app/$NAME || ls -al /app"]

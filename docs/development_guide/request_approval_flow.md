@@ -4,6 +4,8 @@
 
 This document provides a detailed analysis of the Request Approval flow in DYNAMOS, tracing the complete path from a data analyst's request through the system until a response is returned.
 
+Note: The policy-enforcer now also exposes HTTP endpoints for eFLINT management and policy queries (under `/api/v1/eflint/*` and `/api/v1/policy-enforcer/*`). These endpoints are additive and do not change the RabbitMQ request approval flow described below.
+
 ## Review of Your Understanding
 
 Your interpretation was **mostly correct**. Here are a few clarifications and corrections:
