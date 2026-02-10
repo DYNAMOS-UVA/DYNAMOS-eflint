@@ -4,7 +4,7 @@ set -e
 
 # Change this to the path of the DYNAMOS repository on your disk
 echo "Setting up paths..."
-DYNAMOS_ROOT="${HOME}/DYNAMOS"
+DYNAMOS_ROOT="/Users/nielsarts/projects/school/masterproject/DYNAMOS"
 
 # Charts
 charts_path="${DYNAMOS_ROOT}/charts"
@@ -32,7 +32,7 @@ rabbit_pw=$(openssl rand -hex 16)
 
 # Use the RabbitCtl to make a special hash of that password:
 hashed_pw=$($SUDO docker run --rm rabbitmq:3-management rabbitmqctl hash_password $rabbit_pw)
-actual_hash=$(echo "$hashed_pw" | cut -d $'\n' -f2)
+actual_hash=$(echo "$hashed_pw" | tail -n 1)
 
 echo "Replacing tokens..."
 cp ${k8s_service_files}/definitions_example.json ${rabbit_definitions_file}
@@ -65,6 +65,9 @@ echo "Installing Prometheus..."
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 helm upgrade -i -f "${core_chart}/prometheus-values.yaml" prometheus prometheus-community/prometheus
+
+echo "Patch Prometheus to fix node exporter..."
+kubectl patch ds prometheus-prometheus-node-exporter --type "json" -p '[{"op": "remove", "path" : "/spec/template/spec/containers/0/volumeMounts/2/mountPropagation"}]'
 
 echo "Installing NGINX..."
 helm install -f "${core_chart}/ingress-values.yaml" nginx oci://ghcr.io/nginxinc/charts/nginx-ingress -n ingress --version 0.18.0
