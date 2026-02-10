@@ -17,8 +17,8 @@ import (
 // When an instance_id is provided, the handler targets a specific pool instance;
 // otherwise, it falls back to the default manager.
 type InstanceAPIHandler struct {
-	manager *Manager       // Default manager for backward compatibility
-	pool    *InstancePool  // Pool for instance_id-based lookups
+	manager *Manager      // Default manager for backward compatibility
+	pool    *InstancePool // Pool for instance_id-based lookups
 	logger  *zap.Logger
 }
 
@@ -51,22 +51,26 @@ func (h *InstanceAPIHandler) resolveManager(r *http.Request) (*Manager, error) {
 	return entry.Manager, nil
 }
 
-// resolveManagerFromBody resolves a manager using instance_id from a JSON request body.
-// The instanceID field is extracted from the body struct before calling this.
-func (h *InstanceAPIHandler) resolveManagerByID(instanceID string) (*Manager, error) {
+// requireManager validates that instanceID is non-empty, resolves the corresponding
+// pool manager, and writes an HTTP error response if anything fails.
+// Returns the manager and true on success, or nil and false if an error was written.
+func (h *InstanceAPIHandler) requireManager(w http.ResponseWriter, instanceID string) (*Manager, bool) {
 	if instanceID == "" {
-		return h.manager, nil
+		httpapi.WriteError(w, http.StatusBadRequest, "instance_id is required")
+		return nil, false
 	}
 
 	if h.pool == nil {
-		return h.manager, nil
+		httpapi.WriteError(w, http.StatusServiceUnavailable, "instance pool not configured")
+		return nil, false
 	}
 
 	entry, err := h.pool.GetByID(instanceID)
 	if err != nil {
-		return nil, err
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+		return nil, false
 	}
-	return entry.Manager, nil
+	return entry.Manager, true
 }
 
 // -----------------------------------------------------------------------------
@@ -96,14 +100,10 @@ type CommandRequest struct {
 	InstanceID string          `json:"instance_id,omitempty"` // Optional: target a specific pool instance
 }
 
-// StopRequest represents the request body for stopping an instance.
-type StopRequest struct {
-	InstanceID string `json:"instance_id,omitempty"` // Optional: target a specific pool instance
-}
-
-// RestartRequest represents the request body for restarting an instance.
-type RestartRequest struct {
-	InstanceID string `json:"instance_id,omitempty"` // Optional: target a specific pool instance
+// InstanceRequest represents a request body that targets a specific pool instance.
+// Used by stop, restart, and other instance-targeted endpoints.
+type InstanceRequest struct {
+	InstanceID string `json:"instance_id"` // Target pool instance
 }
 
 // CommandResponse represents the response from a command execution.
@@ -280,13 +280,14 @@ func (h *InstanceAPIHandler) Start(w http.ResponseWriter, r *http.Request) {
 // Stop stops the running eFLINT instance.
 // POST /eflint/stop
 func (h *InstanceAPIHandler) Stop(w http.ResponseWriter, r *http.Request) {
-	var req StopRequest
-	// Try to decode body, but don't fail if empty (backward compatible)
-	_ = httpapi.DecodeJSON(r, &req)
+	var req InstanceRequest
+	if err := httpapi.DecodeJSON(r, &req); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 
-	mgr, err := h.resolveManagerByID(req.InstanceID)
-	if err != nil {
-		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+	mgr, ok := h.requireManager(w, req.InstanceID)
+	if !ok {
 		return
 	}
 
@@ -306,12 +307,14 @@ func (h *InstanceAPIHandler) Stop(w http.ResponseWriter, r *http.Request) {
 // Restart restarts the eFLINT instance.
 // POST /eflint/restart
 func (h *InstanceAPIHandler) Restart(w http.ResponseWriter, r *http.Request) {
-	var req RestartRequest
-	_ = httpapi.DecodeJSON(r, &req)
+	var req InstanceRequest
+	if err := httpapi.DecodeJSON(r, &req); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 
-	mgr, err := h.resolveManagerByID(req.InstanceID)
-	if err != nil {
-		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+	mgr, ok := h.requireManager(w, req.InstanceID)
+	if !ok {
 		return
 	}
 
@@ -353,9 +356,8 @@ func (h *InstanceAPIHandler) SendCommand(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	mgr, err := h.resolveManagerByID(req.InstanceID)
-	if err != nil {
-		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+	mgr, ok := h.requireManager(w, req.InstanceID)
+	if !ok {
 		return
 	}
 

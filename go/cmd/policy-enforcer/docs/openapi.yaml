@@ -144,21 +144,16 @@ paths:
     post:
       summary: Stop instance
       description: |
-        Stops the running eFLINT server instance.
-        Optionally specify instance_id in the request body to stop a specific pool instance.
+        Stops a running eFLINT pool instance identified by instance_id.
       operationId: stopInstance
       tags:
         - Instance Management
       requestBody:
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                instance_id:
-                  type: string
-                  description: Optional pool instance ID to target
-                  example: "instance-0"
+              $ref: '#/components/schemas/InstanceRequest'
       responses:
         '200':
           description: Instance stopped successfully
@@ -166,8 +161,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Bad request - invalid body or missing instance_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: No instance running
+          description: Instance not found in pool
           content:
             application/json:
               schema:
@@ -178,12 +179,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Instance pool not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /eflint/command:
     post:
       summary: Send command
       description: |
-        Sends a command to the eFLINT server instance.
+        Sends a command to an eFLINT pool instance identified by instance_id.
         
         The `command` field accepts two formats:
         - **Object format** (recommended): Pass the command as a JSON object directly. No escaping needed.
@@ -207,16 +214,19 @@ paths:
                 summary: Get facts
                 description: Returns the current facts from the eFLINT state.
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: facts
               status:
                 summary: Get eFLINT status
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: status
               create_export:
                 summary: Create export
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: create-export
               # ---------------------------------------------------------------------------
@@ -228,6 +238,7 @@ paths:
                   With object format, quotes in the eFLINT text are just regular JSON string quotes.
                   No double-escaping needed.
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: '+example-fact("value").'
@@ -237,6 +248,7 @@ paths:
                   With string format, you need to escape the outer JSON string AND the inner JSON,
                   leading to double-escaped quotes (\\\" instead of just \").
                 value:
+                  instance_id: "instance-0"
                   command: '{"command": "phrase", "text": "+example-fact(\\\"value\\\")."}'
               # ---------------------------------------------------------------------------
               # Command type: enabled
@@ -244,6 +256,7 @@ paths:
               enabled_object:
                 summary: Query if action is enabled (object format)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: enabled
                     value:
@@ -281,6 +294,7 @@ paths:
               action_authorize_request_type_structured:
                 summary: Action authorize-request-type (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: authorize-request-type
@@ -290,6 +304,7 @@ paths:
               action_authorize_request_type_value:
                 summary: Action authorize-request-type (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -304,6 +319,7 @@ paths:
               action_authorize_request_type_phrase:
                 summary: Action authorize-request-type (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'authorize-request-type("VU", "jorrit.stutterheim@cloudnation.nl", "sqlDataRequest").'
@@ -313,6 +329,7 @@ paths:
               action_revoke_request_type_structured:
                 summary: Action revoke-request-type (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: revoke-request-type
@@ -322,6 +339,7 @@ paths:
               action_revoke_request_type_value:
                 summary: Action revoke-request-type (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -336,6 +354,7 @@ paths:
               action_revoke_request_type_phrase:
                 summary: Action revoke-request-type (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'revoke-request-type("VU", "jorrit.stutterheim@cloudnation.nl", "sqlDataRequest").'
@@ -345,6 +364,7 @@ paths:
               action_authorize_data_set_structured:
                 summary: Action authorize-data-set (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: authorize-data-set
@@ -354,6 +374,7 @@ paths:
               action_authorize_data_set_value:
                 summary: Action authorize-data-set (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -368,6 +389,7 @@ paths:
               action_authorize_data_set_phrase:
                 summary: Action authorize-data-set (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'authorize-data-set("VU", "jorrit.stutterheim@cloudnation.nl", "wageGap").'
@@ -377,6 +399,7 @@ paths:
               action_revoke_data_set_structured:
                 summary: Action revoke-data-set (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: revoke-data-set
@@ -386,6 +409,7 @@ paths:
               action_revoke_data_set_value:
                 summary: Action revoke-data-set (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -400,6 +424,7 @@ paths:
               action_revoke_data_set_phrase:
                 summary: Action revoke-data-set (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'revoke-data-set("VU", "jorrit.stutterheim@cloudnation.nl", "wageGap").'
@@ -409,6 +434,7 @@ paths:
               action_authorize_archetype_structured:
                 summary: Action authorize-archetype (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: authorize-archetype
@@ -418,6 +444,7 @@ paths:
               action_authorize_archetype_value:
                 summary: Action authorize-archetype (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -432,6 +459,7 @@ paths:
               action_authorize_archetype_phrase:
                 summary: Action authorize-archetype (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'authorize-archetype("VU", "jorrit.stutterheim@cloudnation.nl", "computeToData").'
@@ -441,6 +469,7 @@ paths:
               action_revoke_archetype_structured:
                 summary: Action revoke-archetype (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: revoke-archetype
@@ -450,6 +479,7 @@ paths:
               action_revoke_archetype_value:
                 summary: Action revoke-archetype (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -464,6 +494,7 @@ paths:
               action_revoke_archetype_phrase:
                 summary: Action revoke-archetype (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'revoke-archetype("VU", "jorrit.stutterheim@cloudnation.nl", "computeToData").'
@@ -473,6 +504,7 @@ paths:
               action_authorize_compute_provider_structured:
                 summary: Action authorize-compute-provider (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: authorize-compute-provider
@@ -482,6 +514,7 @@ paths:
               action_authorize_compute_provider_value:
                 summary: Action authorize-compute-provider (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -496,6 +529,7 @@ paths:
               action_authorize_compute_provider_phrase:
                 summary: Action authorize-compute-provider (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'authorize-compute-provider("VU", "jorrit.stutterheim@cloudnation.nl", "SURF").'
@@ -505,6 +539,7 @@ paths:
               action_revoke_compute_provider_structured:
                 summary: Action revoke-compute-provider (structured form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: revoke-compute-provider
@@ -514,6 +549,7 @@ paths:
               action_revoke_compute_provider_value:
                 summary: Action revoke-compute-provider (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -528,6 +564,7 @@ paths:
               action_revoke_compute_provider_phrase:
                 summary: Action revoke-compute-provider (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'revoke-compute-provider("VU", "jorrit.stutterheim@cloudnation.nl", "SURF").'
@@ -538,6 +575,7 @@ paths:
                 summary: Action submit-request (structured form)
                 description: submit-request has actor=requester, recipient=organization; objects are request-type, data-set, archetype, compute-provider.
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     act-type: submit-request
@@ -551,6 +589,7 @@ paths:
               action_submit_request_value:
                 summary: Action submit-request (value form)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: action
                     value:
@@ -571,6 +610,7 @@ paths:
               action_submit_request_phrase:
                 summary: Action submit-request (phrase command)
                 value:
+                  instance_id: "instance-0"
                   command:
                     command: phrase
                     text: 'submit-request("jorrit.stutterheim@cloudnation.nl", "VU", "sqlDataRequest", "wageGap", "computeToData", "SURF").'
@@ -581,26 +621,45 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommandResponse'
+        '400':
+          description: Bad request - invalid body, missing command, or missing instance_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Instance not found in pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Instance pool not configured or instance not running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /eflint/restart:
     post:
       summary: Restart instance
       description: |
-        Restarts the eFLINT server instance with the same model.
-        Optionally specify instance_id to restart a specific pool instance.
+        Restarts an eFLINT pool instance identified by instance_id with the same model.
       operationId: restartInstance
       tags:
         - Instance Management
       requestBody:
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                instance_id:
-                  type: string
-                  description: Optional pool instance ID to target
-                  example: "instance-0"
+              $ref: '#/components/schemas/InstanceRequest'
       responses:
         '200':
           description: Instance restarted successfully
@@ -608,14 +667,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Bad request - invalid body or missing instance_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: No instance running or instance not found
+          description: Instance not found in pool
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Instance pool not configured
           content:
             application/json:
               schema:
@@ -1151,10 +1222,21 @@ components:
           default: false
           example: false
 
+    InstanceRequest:
+      type: object
+      required:
+        - instance_id
+      properties:
+        instance_id:
+          type: string
+          description: The pool instance ID to target
+          example: "instance-0"
+
     CommandRequest:
       type: object
       required:
         - command
+        - instance_id
       properties:
         command:
           description: |
@@ -1188,7 +1270,7 @@ components:
               example: '{"command": "phrase", "text": "+example-fact(\\\"value\\\")."}'
         instance_id:
           type: string
-          description: Optional pool instance ID to target. If omitted, the default instance is used.
+          description: The pool instance ID to target
           example: "instance-0"
 
     CommandResponse:
