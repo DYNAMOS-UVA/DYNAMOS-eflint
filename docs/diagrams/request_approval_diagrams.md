@@ -458,13 +458,88 @@ end note
 @enduml
 ```
 
-### 2.3 Policy Enforcer — Dual-Strategy Validation
+### 2.3 Policy Enforcer — Dual-Strategy Validation (Simplified)
+
+A condensed view that shows the overall flow without expanding the internal
+details of each strategy. For the eFLINT pool lifecycle and instance
+interaction, see [§2.4](#24-policy-enforcer--eflint-pool-acquirerelease-cycle).
+
+```plantuml
+@startuml Sequence - Policy Enforcer (Simplified)
+!theme cerulean
+
+title Policy Enforcer — Dual-Strategy Sequence (Simplified)
+
+queue "RabbitMQ\npolicyEnforcer-in" as MQ_PE
+participant "handleRequestApproval()\n[consume.go]" as HandleRA
+participant "ValidationService" as ValSvc
+participant "resolveStrategy()" as Resolve
+database "etcd" as etcd
+
+participant "LegacyValidation\nStrategy" as Legacy
+participant "EflintValidation\nStrategy" as Eflint
+
+participant "Auth Generator" as Auth
+queue "RabbitMQ\norchestrator-in" as MQ_Orch
+
+MQ_PE -> HandleRA : Consume requestApproval
+activate HandleRA
+
+HandleRA -> ValSvc : ValidateRequest(request)
+activate ValSvc
+
+loop For each dataProvider (concurrent goroutines)
+    ValSvc -> Resolve : resolveStrategy(provider)
+    activate Resolve
+    Resolve -> etcd : GET /policyEnforcer/configs/{provider}
+    etcd --> Resolve : ProviderValidationConfig
+    deactivate Resolve
+
+    alt config.strategy == "eflint" && eFLINT available
+        ValSvc -> Eflint : Validate(steward, userName)
+        activate Eflint
+        Eflint -> etcd : Load eFLINT model & query facts
+        Eflint --> ValSvc : ValidationResult
+        deactivate Eflint
+
+    else config.strategy == "legacy" or fallback
+        ValSvc -> Legacy : Validate(steward, userName)
+        activate Legacy
+        Legacy -> etcd : Load agreement & check user access
+        Legacy --> ValSvc : ValidationResult
+        deactivate Legacy
+    end
+end
+
+ValSvc -> ValSvc : processValidationResults()\nPopulate Valid/Invalid providers
+
+alt ValidDataproviders > 0
+    ValSvc -> Auth : Generate auth token
+    Auth --> ValSvc : Auth token
+    ValSvc -> ValSvc : RequestApproved = true
+else No valid providers
+    ValSvc -> ValSvc : RequestApproved = false
+end
+
+ValSvc --> HandleRA : ValidationResponse
+deactivate ValSvc
+
+HandleRA -> MQ_Orch : SendValidationResponse()\n→ orchestrator-in
+deactivate HandleRA
+
+@enduml
+```
+
+### 2.3.1 Policy Enforcer — Dual-Strategy Validation (Detailed)
+
+The fully expanded version showing internal logic for both strategies,
+including the eFLINT pool acquire/release and legacy agreement lookups.
 
 ```plantuml
 @startuml Sequence - Policy Enforcer
 !theme cerulean
 
-title Policy Enforcer — Dual-Strategy Sequence
+title Policy Enforcer — Dual-Strategy Sequence (Detailed)
 
 queue "RabbitMQ\npolicyEnforcer-in" as MQ_PE
 participant "handleIncomingMessages()\n[consume.go]" as Router
@@ -967,6 +1042,7 @@ skinparam component {
 }
 
 actor "Data Analyst" as analyst
+actor "Policy Engineer" as engineer
 
 rectangle "DYNAMOS Platform" {
 
@@ -990,9 +1066,9 @@ rectangle "DYNAMOS Platform" {
     queue "RabbitMQ\n(Message Broker)" as rabbit
 }
 
-' External actor
+' External actors
 analyst --> api : HTTP
-analyst ..> pe_http : HTTP (optional\ndirect queries)
+engineer ..> pe_http : HTTP (policy\nqueries & management)
 
 ' Inter-service communication via RabbitMQ
 api -- rabbit
