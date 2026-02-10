@@ -4,6 +4,7 @@ package eflint
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -272,12 +273,79 @@ func (m *Manager) SendCommand(command string) (string, error) {
 		return "", fmt.Errorf("failed to read response: %v", err)
 	}
 
-	m.logger.Debug("sent command to eFLINT instance",
-		zap.String("command", command),
-		zap.String("response", strings.TrimSpace(response)),
-	)
+	m.logger.Debug("sent command to eFLINT instance")
 
 	return strings.TrimSpace(response), nil
+}
+
+// SendPhrases sends a full eFLINT specification to the server using the "phrases" command.
+// Unlike the singular "phrase" command (which sends one line at a time), "phrases" sends
+// the entire eFLINT file content in one go. The response is checked for errors.
+func (m *Manager) SendPhrases(text string) (*PhrasesResponse, error) {
+	// Build the command as a struct to get proper JSON escaping of the text
+	type phrasesCmd struct {
+		Command string `json:"command"`
+		Text    string `json:"text"`
+	}
+
+	cmd := phrasesCmd{
+		Command: "phrases",
+		Text:    text,
+	}
+
+	cmdJSON, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal phrases command: %w", err)
+	}
+
+	// Ensure the command is on a single line (the eFLINT server uses line-based protocol)
+	cmdStr := strings.ReplaceAll(string(cmdJSON), "\n", " ")
+	cmdStr = strings.ReplaceAll(cmdStr, "\r", " ")
+
+	m.logger.Debug("sending phrases command",
+		zap.Int("text_length", len(text)),
+		zap.Int("command_size", len(cmdStr)),
+	)
+
+	response, err := m.SendCommand(cmdStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send phrases command: %w", err)
+	}
+
+	// Parse the response
+	var phrasesResp PhrasesResponse
+	if err := json.Unmarshal([]byte(response), &phrasesResp); err != nil {
+		return nil, fmt.Errorf("failed to parse phrases response: %w", err)
+	}
+
+	// Check for errors in the response
+	if len(phrasesResp.Errors) > 0 {
+		var errMsgs []string
+		for _, e := range phrasesResp.Errors {
+			errMsgs = append(errMsgs, e.Message)
+		}
+		return &phrasesResp, fmt.Errorf("eFLINT phrases command had errors: %s", strings.Join(errMsgs, "; "))
+	}
+
+	m.logger.Debug("phrases command completed successfully",
+		zap.Int("query_results", len(phrasesResp.QueryResults)),
+	)
+
+	return &phrasesResp, nil
+}
+
+// PhrasesResponse represents the response from an eFLINT "phrases" command.
+type PhrasesResponse struct {
+	Response     string   `json:"response"`
+	QueryResults []string `json:"query-results"`
+	Errors       []struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"errors"`
+	Violations []struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"violations"`
 }
 
 // GetState retrieves the state by sending an export command.

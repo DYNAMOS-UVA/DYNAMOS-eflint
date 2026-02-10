@@ -2,32 +2,45 @@ package service
 
 import (
 	"context"
+	"sync"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
+	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	"go.uber.org/zap"
 )
 
 // ValidationService orchestrates the validation of request approvals.
+// It uses the Strategy pattern to delegate validation to the appropriate
+// strategy based on provider configuration.
 type ValidationService struct {
-	agreementRepo repository.AgreementRepository
-	validator     *AgreementValidator
+	// Strategy resolution
+	providerConfigRepo repository.ProviderConfigRepository
+	legacyStrategy     ValidationStrategy
+	eflintStrategy     ValidationStrategy
+
+	// Common dependencies
 	authGenerator AuthTokenGenerator
 	logger        *zap.Logger
 }
 
-// NewValidationService creates a new ValidationService with the given dependencies.
-func NewValidationService(
-	agreementRepo repository.AgreementRepository,
-	validator *AgreementValidator,
-	authGenerator AuthTokenGenerator,
-	logger *zap.Logger,
-) *ValidationService {
+// ValidationServiceConfig holds the configuration for creating a ValidationService.
+type ValidationServiceConfig struct {
+	ProviderConfigRepo repository.ProviderConfigRepository
+	LegacyStrategy     ValidationStrategy
+	EflintStrategy     ValidationStrategy // Optional: nil if eFLINT not configured
+	AuthGenerator      AuthTokenGenerator
+	Logger             *zap.Logger
+}
+
+// NewValidationServiceWithConfig creates a ValidationService with the given configuration.
+func NewValidationServiceWithConfig(cfg ValidationServiceConfig) *ValidationService {
 	return &ValidationService{
-		agreementRepo: agreementRepo,
-		validator:     validator,
-		authGenerator: authGenerator,
-		logger:        logger,
+		providerConfigRepo: cfg.ProviderConfigRepo,
+		legacyStrategy:     cfg.LegacyStrategy,
+		eflintStrategy:     cfg.EflintStrategy,
+		authGenerator:      cfg.AuthGenerator,
+		logger:             cfg.Logger,
 	}
 }
 
@@ -68,7 +81,7 @@ func (s *ValidationService) ValidateRequest(ctx context.Context, request *pb.Req
 // buildInitialResponse creates the initial ValidationResponse with base fields.
 func (s *ValidationService) buildInitialResponse(request *pb.RequestApproval) *pb.ValidationResponse {
 	response := &pb.ValidationResponse{
-		Type:        MessageTypeValidationResponse,
+		Type:        "validationResponse",
 		RequestType: request.Type,
 		User: &pb.User{
 			Id:       request.User.Id,
@@ -82,54 +95,69 @@ func (s *ValidationService) buildInitialResponse(request *pb.RequestApproval) *p
 	}
 
 	// Copy options from request if present
-	if request.Options != nil && len(request.Options) > 0 {
+	if len(request.Options) > 0 {
 		response.Options = request.Options
 	}
 
 	return response
 }
 
-// validateDataProviders validates agreements for all requested data providers.
+// validateDataProviders validates agreements for all requested data providers concurrently.
+// Each provider validation acquires its own pool instance, enabling parallel validation.
 func (s *ValidationService) validateDataProviders(dataProviders []string, userName string) []*ValidationResult {
-	results := make([]*ValidationResult, 0, len(dataProviders))
+	results := make([]*ValidationResult, len(dataProviders))
 
-	for _, steward := range dataProviders {
-		result := s.validateSingleProvider(steward, userName)
-		results = append(results, result)
+	var wg sync.WaitGroup
+	for i, steward := range dataProviders {
+		wg.Add(1)
+		go func(idx int, st string) {
+			defer wg.Done()
+			results[idx] = s.validateSingleProvider(st, userName)
+		}(i, steward)
 	}
+	wg.Wait()
 
 	return results
 }
 
-// validateSingleProvider validates a single data provider's agreement for a user.
+// validateSingleProvider validates a single data provider using the appropriate strategy.
 func (s *ValidationService) validateSingleProvider(steward, userName string) *ValidationResult {
-	// Fetch agreement from repository
-	agreement, found, err := s.agreementRepo.GetAgreement(steward)
+	strategy := s.resolveStrategy(steward)
+
+	s.logger.Debug("Using validation strategy",
+		zap.String("steward", steward),
+		zap.String("strategy", strategy.Name()),
+	)
+
+	return strategy.Validate(steward, userName)
+}
+
+// resolveStrategy determines which validation strategy to use for a provider.
+func (s *ValidationService) resolveStrategy(steward string) ValidationStrategy {
+	// Default to legacy if no provider config repo
+	if s.providerConfigRepo == nil {
+		return s.legacyStrategy
+	}
+
+	config, found, err := s.providerConfigRepo.GetProviderConfig(steward)
 	if err != nil {
-		s.logger.Error("Failed to retrieve agreement",
+		s.logger.Warn("Failed to retrieve provider config, defaulting to legacy validation",
 			zap.String("steward", steward),
 			zap.Error(err),
 		)
-		return &ValidationResult{
-			Steward:       steward,
-			IsValid:       false,
-			InvalidReason: "error retrieving agreement",
-		}
+		return s.legacyStrategy
 	}
 
 	if !found {
-		s.logger.Info("Agreement not found for steward",
-			zap.String("steward", steward),
-		)
-		return &ValidationResult{
-			Steward:       steward,
-			IsValid:       false,
-			InvalidReason: "agreement not found",
-		}
+		return s.legacyStrategy
 	}
 
-	// Validate user access against the agreement
-	return s.validator.ValidateUserAccess(agreement, userName)
+	// Use eFLINT strategy if configured and available
+	if config.ValidationStrategy == api.ValidationStrategyEflint && s.eflintStrategy != nil {
+		return s.eflintStrategy
+	}
+
+	return s.legacyStrategy
 }
 
 // processValidationResults updates the response based on validation results.

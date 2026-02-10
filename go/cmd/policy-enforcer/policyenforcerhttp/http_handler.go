@@ -23,108 +23,9 @@ func NewHTTPHandler(enforcer *policyenforcer.Enforcer, logger *zap.Logger) *HTTP
 	}
 }
 
-// GetReasonerInfo returns information about the active reasoner.
-// GET /policy-enforcer/info
-func (h *HTTPHandler) GetReasonerInfo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	info := h.enforcer.GetReasonerInfo()
-	httpapi.WriteJSON(w, http.StatusOK, info)
-}
-
-// GetAllowedRequestTypes returns all request types allowed for a requester at an organization.
-// GET /policy-enforcer/allowed-request-types?organization=VU&requester=user@example.com
-func (h *HTTPHandler) GetAllowedRequestTypes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization, requester, ok := h.parseOrgRequester(w, r)
-	if !ok {
-		return
-	}
-
-	result, err := h.enforcer.GetAllowedRequestTypes(r.Context(), organization, requester)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, result)
-}
-
-// GetAllowedDataSets returns all datasets allowed for a requester at an organization.
-// GET /policy-enforcer/allowed-data-sets?organization=VU&requester=user@example.com
-func (h *HTTPHandler) GetAllowedDataSets(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization, requester, ok := h.parseOrgRequester(w, r)
-	if !ok {
-		return
-	}
-
-	result, err := h.enforcer.GetAllowedDataSets(r.Context(), organization, requester)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, result)
-}
-
-// GetAllowedArchetypes returns all archetypes allowed for a requester at an organization.
-// GET /policy-enforcer/allowed-archetypes?organization=VU&requester=user@example.com
-func (h *HTTPHandler) GetAllowedArchetypes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization, requester, ok := h.parseOrgRequester(w, r)
-	if !ok {
-		return
-	}
-
-	result, err := h.enforcer.GetAllowedArchetypes(r.Context(), organization, requester)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, result)
-}
-
-// GetAllowedComputeProviders returns all compute providers allowed for a requester at an organization.
-// GET /policy-enforcer/allowed-compute-providers?organization=VU&requester=user@example.com
-func (h *HTTPHandler) GetAllowedComputeProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization, requester, ok := h.parseOrgRequester(w, r)
-	if !ok {
-		return
-	}
-
-	result, err := h.enforcer.GetAllowedComputeProviders(r.Context(), organization, requester)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, result)
-}
-
 // GetAllAllowedClauses returns all allowed clauses for a requester at an organization.
 // GET /policy-enforcer/allowed-clauses?organization=VU&requester=user@example.com
 func (h *HTTPHandler) GetAllAllowedClauses(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	organization, requester, ok := h.parseOrgRequester(w, r)
 	if !ok {
 		return
@@ -143,10 +44,6 @@ func (h *HTTPHandler) GetAllAllowedClauses(w http.ResponseWriter, r *http.Reques
 // POST /policy-enforcer/validate
 // Body: { "organization": "VU", "requester": "user@example.com", "request_type": "sqlDataRequest", ... }
 func (h *HTTPHandler) ValidateRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	var params policyenforcer.ValidateRequestParams
 	if err := httpapi.DecodeJSON(r, &params); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -186,56 +83,6 @@ func (h *HTTPHandler) ValidateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpapi.WriteJSON(w, http.StatusOK, result)
-}
-
-// GetAvailableArchetypes returns archetypes available at an organization (not requester-specific).
-// GET /policy-enforcer/available-archetypes?organization=VU
-func (h *HTTPHandler) GetAvailableArchetypes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization := r.URL.Query().Get("organization")
-	if organization == "" {
-		httpapi.WriteError(w, http.StatusBadRequest, "organization parameter is required")
-		return
-	}
-
-	values, err := h.enforcer.GetAvailableArchetypes(r.Context(), organization)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, map[string]interface{}{
-		"organization": organization,
-		"archetypes":   values,
-	})
-}
-
-// GetAvailableComputeProviders returns compute providers available at an organization (not requester-specific).
-// GET /policy-enforcer/available-compute-providers?organization=VU
-func (h *HTTPHandler) GetAvailableComputeProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	organization := r.URL.Query().Get("organization")
-	if organization == "" {
-		httpapi.WriteError(w, http.StatusBadRequest, "organization parameter is required")
-		return
-	}
-
-	values, err := h.enforcer.GetAvailableComputeProviders(r.Context(), organization)
-	if err != nil {
-		h.handleError(w, err)
-		return
-	}
-
-	httpapi.WriteJSON(w, http.StatusOK, map[string]interface{}{
-		"organization":      organization,
-		"compute_providers": values,
-	})
 }
 
 // -----------------------------------------------------------------------------

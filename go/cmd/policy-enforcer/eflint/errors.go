@@ -2,7 +2,6 @@ package eflint
 
 import (
 	"errors"
-	"fmt"
 )
 
 // -----------------------------------------------------------------------------
@@ -46,32 +45,3 @@ var (
 	// or unexpected response format.
 	ErrInvalidResponse = errors.New("invalid response from eFLINT server")
 )
-
-// -----------------------------------------------------------------------------
-// Instance Error
-// -----------------------------------------------------------------------------
-
-// InstanceError wraps an error with instance-specific context.
-// This allows error handlers to identify the operation that caused the error.
-type InstanceError struct {
-	Operation string // The operation that caused the error (e.g., "start", "stop")
-	Err       error  // The underlying error
-}
-
-// Error returns a formatted error message including the operation.
-func (e *InstanceError) Error() string {
-	return fmt.Sprintf("instance %s: %v", e.Operation, e.Err)
-}
-
-// Unwrap returns the underlying error for use with errors.Is() and errors.As().
-func (e *InstanceError) Unwrap() error {
-	return e.Err
-}
-
-// NewInstanceError creates a new InstanceError with the given operation and underlying error.
-func NewInstanceError(operation string, err error) *InstanceError {
-	return &InstanceError{
-		Operation: operation,
-		Err:       err,
-	}
-}

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/eflint"
-	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/httpapi"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/policyenforcer"
 	policyenforcerhttp "github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/policyenforcerhttp"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/reasoner"
@@ -24,12 +23,11 @@ import (
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	"github.com/gorilla/handlers"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.opencensus.io/plugin/ochttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
-//go:embed eflint/dynamos-agreement.eflint
+//go:embed eflint/empty.eflint
 var embeddedModelFS embed.FS
 
 // Application holds all the dependencies for the policy enforcer service.
@@ -64,18 +62,32 @@ func NewApplication() (*Application, error) {
 		},
 	)
 
-	// Initialize the validation service with all its dependencies
-	app.validationService = service.NewValidationService(
-		repository.NewEtcdAgreementRepository(app.etcdClient),
-		service.NewAgreementValidator(),
-		service.NewStaticAuthTokenGenerator(),
-		app.logger,
-	)
+	// ValidationService will be initialized after eFLINT components are set up
+	// See initializeValidationService()
 
 	// Initialize the response sender
 	app.responseSender = service.NewRabbitMQResponseSender(app.rabbitMQClient)
 
 	return app, nil
+}
+
+// initializeValidationService creates and configures the ValidationService with all strategies.
+func (app *Application) initializeValidationService(
+	providerConfigRepo repository.ProviderConfigRepository,
+	eflintStrategy service.ValidationStrategy,
+) {
+	legacyStrategy := service.NewLegacyValidationStrategy(
+		repository.NewEtcdAgreementRepository(app.etcdClient),
+		app.logger,
+	)
+
+	app.validationService = service.NewValidationServiceWithConfig(service.ValidationServiceConfig{
+		ProviderConfigRepo: providerConfigRepo,
+		LegacyStrategy:     legacyStrategy,
+		EflintStrategy:     eflintStrategy,
+		AuthGenerator:      service.NewStaticAuthTokenGenerator(),
+		Logger:             app.logger,
+	})
 }
 
 // Close cleanly shuts down all resources.
@@ -119,9 +131,10 @@ func main() {
 
 	app.Run()
 
+	// Resolve the empty model path for bootstrapping pool instances
 	modelPath := resolveModelPath(app.logger, eflintModelPath)
 	if modelPath == "" {
-		app.logger.Warn("eflint model path is empty; auto-start will be skipped unless configured")
+		app.logger.Warn("eflint model path is empty; pool instances cannot be started")
 	}
 
 	managerConfig := &eflint.ManagerConfig{
@@ -131,17 +144,53 @@ func main() {
 		StartupDelay:      eflintStartupDelay,
 		ConnectionTimeout: eflintTimeout,
 	}
-	manager := eflint.NewManager(managerConfig, app.logger)
-	stateManager := eflint.NewStateManager(manager, eflintStateDir, app.logger)
 
-	// Create the eFLINT reasoner (implements the Reasoner interface)
-	eflintReasoner := reasoner.NewEflintReasoner(manager, app.logger)
+	// Create the instance pool (replaces the single Manager for validation)
+	poolConfig := &eflint.PoolConfig{
+		TargetSize:          eflintPoolSize,
+		ManagerConfig:       managerConfig,
+		EmptyModelPath:      modelPath,
+		HealthCheckInterval: eflintHealthCheckInterval,
+		AcquireTimeout:      eflintAcquireTimeout,
+	}
+
+	pool, err := eflint.NewInstancePool(poolConfig, eflintStateDir, app.logger)
+	if err != nil {
+		app.logger.Error("failed to create eFLINT instance pool", zap.Error(err))
+		panic(fmt.Sprintf("Failed to create eFLINT instance pool: %v", err))
+	}
+
+	// Initialize repositories
+	providerConfigRepo := repository.NewEtcdProviderConfigRepository(app.etcdClient)
+	eflintModelRepo := repository.NewEtcdEflintModelRepository(app.etcdClient)
+
+	// Create the eFLINT reasoner (implements the Reasoner interface, uses pool + model repo)
+	eflintReasoner := reasoner.NewEflintReasoner(pool, eflintModelRepo, app.logger)
+
+	// Create eFLINT validation strategy (delegates to the Reasoner)
+	eflintStrategy := service.NewEflintValidationStrategy(eflintReasoner, app.logger)
+
+	// Initialize ValidationService with both strategies
+	app.initializeValidationService(providerConfigRepo, eflintStrategy)
+
+	app.logger.Info("ValidationService configured with legacy and eFLINT strategies (pool-based)")
 
 	// Create the policy enforcer (uses the Reasoner interface)
 	enforcer := policyenforcer.NewEnforcer(eflintReasoner, app.logger)
 
-	instanceAPIHandler := eflint.NewInstanceAPIHandler(manager, app.logger)
-	stateAPIHandler := eflint.NewStateAPIHandler(stateManager, app.logger)
+	// Create a single Manager for the eFLINT debug/management HTTP API endpoints
+	defaultManager := eflint.NewManager(managerConfig, app.logger)
+	defaultStateManager := eflint.NewStateManager(defaultManager, eflintStateDir, app.logger)
+
+	if autoStartEflint && modelPath != "" {
+		app.logger.Info("auto-starting default eFLINT server for HTTP API", zap.String("model", modelPath))
+		if err := defaultManager.Start(modelPath); err != nil {
+			app.logger.Error("failed to auto-start default eFLINT server", zap.Error(err))
+		}
+	}
+
+	instanceAPIHandler := eflint.NewInstanceAPIHandler(defaultManager, pool, app.logger)
+	stateAPIHandler := eflint.NewStateAPIHandler(defaultStateManager, pool, app.logger)
 	policyEnforcerHandler := policyenforcerhttp.NewHTTPHandler(enforcer, app.logger)
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization"})
@@ -151,33 +200,8 @@ func main() {
 	mux := http.NewServeMux()
 	apiMux := http.NewServeMux()
 
-	mux.Handle("/health", http.HandlerFunc(healthHandler))
-
-	// eFLINT instance management endpoints
-	apiMux.Handle("/eflint/status", &ochttp.Handler{Handler: http.HandlerFunc(instanceAPIHandler.GetStatus)})
-	apiMux.Handle("/eflint/start", &ochttp.Handler{Handler: http.HandlerFunc(instanceAPIHandler.Start)})
-	apiMux.Handle("/eflint/stop", &ochttp.Handler{Handler: http.HandlerFunc(instanceAPIHandler.Stop)})
-	apiMux.Handle("/eflint/command", &ochttp.Handler{Handler: http.HandlerFunc(instanceAPIHandler.SendCommand)})
-
-	// eFLINT state endpoints
-	apiMux.Handle("/eflint/state", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.GetState)})
-	apiMux.Handle("/eflint/state/export", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.ExportState)})
-	apiMux.Handle("/eflint/state/import", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.ImportState)})
-	apiMux.Handle("/eflint/state/checkpoint", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.CreateCheckpoint)})
-	apiMux.Handle("/eflint/state/checkpoint/restore", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.RestoreCheckpoint)})
-	apiMux.Handle("/eflint/state/checkpoints", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.ListCheckpoints)})
-	apiMux.Handle("/eflint/state/checkpoint/", &ochttp.Handler{Handler: http.HandlerFunc(stateAPIHandler.DeleteCheckpoint)})
-
-	// Policy enforcer endpoints
-	apiMux.Handle("/policy-enforcer/info", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetReasonerInfo)})
-	apiMux.Handle("/policy-enforcer/allowed-request-types", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAllowedRequestTypes)})
-	apiMux.Handle("/policy-enforcer/allowed-data-sets", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAllowedDataSets)})
-	apiMux.Handle("/policy-enforcer/allowed-archetypes", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAllowedArchetypes)})
-	apiMux.Handle("/policy-enforcer/allowed-compute-providers", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAllowedComputeProviders)})
-	apiMux.Handle("/policy-enforcer/allowed-clauses", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAllAllowedClauses)})
-	apiMux.Handle("/policy-enforcer/validate", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.ValidateRequest)})
-	apiMux.Handle("/policy-enforcer/available-archetypes", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAvailableArchetypes)})
-	apiMux.Handle("/policy-enforcer/available-compute-providers", &ochttp.Handler{Handler: http.HandlerFunc(policyEnforcerHandler.GetAvailableComputeProviders)})
+	// Register all routes
+	RegisterRoutes(apiMux, instanceAPIHandler, stateAPIHandler, policyEnforcerHandler, pool)
 
 	mux.Handle(apiVersion+"/", http.StripPrefix(apiVersion, apiMux))
 
@@ -193,22 +217,19 @@ func main() {
 		}
 	}()
 
-	if autoStartEflint && modelPath != "" {
-		app.logger.Info("auto-starting eFLINT server", zap.String("model", modelPath))
-		if err := manager.Start(modelPath); err != nil {
-			app.logger.Error("failed to auto-start eFLINT server", zap.Error(err))
-		}
-	}
-
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	app.logger.Info("shutting down...")
 
-	if manager.IsRunning() {
-		if err := manager.Stop(); err != nil {
-			app.logger.Error("failed to stop eFLINT server", zap.Error(err))
+	// Shutdown the pool (stops all instances and health monitor)
+	pool.Shutdown()
+
+	// Stop the default manager if running
+	if defaultManager.IsRunning() {
+		if err := defaultManager.Stop(); err != nil {
+			app.logger.Error("failed to stop default eFLINT server", zap.Error(err))
 		}
 	}
 
@@ -219,14 +240,6 @@ func main() {
 	}
 
 	app.logger.Info("shutdown complete")
-}
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	httpapi.WriteJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
 }
 
 func resolveModelPath(logger *zap.Logger, configuredPath string) string {
@@ -241,7 +254,7 @@ func resolveModelPath(logger *zap.Logger, configuredPath string) string {
 		}
 	}
 
-	data, err := embeddedModelFS.ReadFile("eflint/dynamos-agreement.eflint")
+	data, err := embeddedModelFS.ReadFile("eflint/empty.eflint")
 	if err != nil {
 		logger.Warn("failed to read embedded model", zap.Error(err))
 		return configuredPath

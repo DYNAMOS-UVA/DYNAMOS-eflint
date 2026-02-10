@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"go.uber.org/zap"
 )
 
@@ -27,15 +28,6 @@ type StateManager struct {
 	stateDir        string       // Directory for persisting state files
 	logger          *zap.Logger  // Logger for operations
 	mu              sync.RWMutex // Protects concurrent access
-}
-
-// SavedState represents a saved eFLINT execution graph state.
-// It captures the complete state of an eFLINT instance at a point in time.
-type SavedState struct {
-	ID            string          `json:"id"`             // Unique identifier for this saved state
-	ModelLocation string          `json:"model_location"` // Path to the model when state was saved
-	Graph         json.RawMessage `json:"graph"`          // The eFLINT execution graph
-	SavedAt       time.Time       `json:"saved_at"`       // Timestamp when state was saved
 }
 
 // NewStateManager creates a new StateManager with the given instance manager and configuration.
@@ -72,7 +64,7 @@ func (sm *StateManager) GetState() (string, error) {
 
 // ExportState exports the current state of the eFLINT instance.
 // Returns a SavedState containing the execution graph that can be imported later.
-func (sm *StateManager) ExportState() (*SavedState, error) {
+func (sm *StateManager) ExportState() (*api.EflintSavedState, error) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -96,7 +88,7 @@ func (sm *StateManager) ExportState() (*SavedState, error) {
 
 	status := sm.instanceManager.Status()
 
-	savedState := &SavedState{
+	savedState := &api.EflintSavedState{
 		ID:            fmt.Sprintf("state-%d", time.Now().UnixNano()),
 		ModelLocation: status.ModelLocation,
 		Graph:         json.RawMessage(response),
@@ -114,7 +106,7 @@ func (sm *StateManager) ExportState() (*SavedState, error) {
 // ImportState imports a previously saved state into the eFLINT instance
 // NOTE: Due to a bug in the eFLINT server, load-export may crash the server.
 // This implementation attempts the load-export, and if it fails, restarts the instance.
-func (sm *StateManager) ImportState(savedState *SavedState) error {
+func (sm *StateManager) ImportState(savedState *api.EflintSavedState) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -157,10 +149,7 @@ func (sm *StateManager) ImportState(savedState *SavedState) error {
 	cmdStr := strings.ReplaceAll(string(cmdJSON), "\n", " ")
 	cmdStr = strings.ReplaceAll(cmdStr, "\r", " ")
 
-	sm.logger.Debug("sending load-export command",
-		zap.Int("command_size", len(cmdStr)),
-		zap.String("command_preview", cmdStr[:min(len(cmdStr), 500)]),
-	)
+	sm.logger.Debug("sending load-export command", zap.Int("command_size", len(cmdStr)))
 
 	// Send load-export command
 	response, err := sm.instanceManager.SendCommand(cmdStr)
@@ -237,8 +226,99 @@ func stripTypeExtensionLines(program string) string {
 	return strings.Join(result, "\n")
 }
 
+// Revert reverts the eFLINT server to its initial (empty) state by sending a revert command.
+// The value 1 means "revert to node 1 in the execution graph" (the starting state).
+// After reverting, it verifies the state is actually empty by checking that target_contents
+// in the status response is an empty array.
+func (sm *StateManager) Revert() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !sm.instanceManager.IsRunning() {
+		return ErrInstanceNotRunning
+	}
+
+	// Send revert command to go back to node 1 (initial empty state)
+	type revertCmd struct {
+		Command string `json:"command"`
+		Value   int    `json:"value"`
+	}
+
+	cmd := revertCmd{
+		Command: "revert",
+		Value:   1,
+	}
+
+	cmdJSON, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal revert command: %w", err)
+	}
+
+	response, err := sm.instanceManager.SendCommand(string(cmdJSON))
+	if err != nil {
+		return fmt.Errorf("failed to send revert command: %w", err)
+	}
+
+	// Verify the revert succeeded by checking the response
+	var respObj map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &respObj); err != nil {
+		return fmt.Errorf("failed to parse revert response: %w", err)
+	}
+
+	if respObj["response"] == "invalid command" {
+		return fmt.Errorf("eFLINT rejected revert command: %v", respObj["message"])
+	}
+
+	sm.logger.Info("reverted eFLINT instance to initial state")
+	return nil
+}
+
+// VerifyEmptyState checks whether the eFLINT server is in an empty state
+// by querying its status and verifying that target_contents is an empty array.
+func (sm *StateManager) VerifyEmptyState() (bool, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if !sm.instanceManager.IsRunning() {
+		return false, ErrInstanceNotRunning
+	}
+
+	response, err := sm.instanceManager.GetEflintStatus()
+	if err != nil {
+		return false, fmt.Errorf("failed to get eFLINT status: %w", err)
+	}
+
+	var statusResp map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &statusResp); err != nil {
+		return false, fmt.Errorf("failed to parse status response: %w", err)
+	}
+
+	// Check if target_contents is an empty array
+	targetContents, ok := statusResp["target_contents"]
+	if !ok {
+		// If target_contents is not present, assume it might be empty
+		sm.logger.Warn("target_contents field not found in status response")
+		return false, nil
+	}
+
+	// Check if it's an array and if it's empty
+	if arr, ok := targetContents.([]interface{}); ok {
+		isEmpty := len(arr) == 0
+		sm.logger.Debug("verified eFLINT state",
+			zap.Bool("isEmpty", isEmpty),
+			zap.Int("target_contents_length", len(arr)),
+		)
+		return isEmpty, nil
+	}
+
+	sm.logger.Warn("target_contents is not an array",
+		zap.String("type", fmt.Sprintf("%T", targetContents)),
+	)
+	return false, nil
+}
+
 // SaveStateToFile saves the current state to a file
-func (sm *StateManager) SaveStateToFile(filename string) (*SavedState, error) {
+func (sm *StateManager) SaveStateToFile(filename string) (*api.EflintSavedState, error) {
 	state, err := sm.ExportState()
 	if err != nil {
 		return nil, err
@@ -272,7 +352,7 @@ func (sm *StateManager) LoadStateFromFile(filename string) error {
 		return fmt.Errorf("failed to read state file: %w", err)
 	}
 
-	var state SavedState
+	var state api.EflintSavedState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("failed to unmarshal state: %w", err)
 	}
@@ -323,7 +403,7 @@ func (sm *StateManager) DeleteSavedState(filename string) error {
 
 // CreateCheckpoint creates a checkpoint of the current state that can be restored later
 // This is useful for "what-if" scenarios where you want to test something and then rollback
-func (sm *StateManager) CreateCheckpoint(name string) (*SavedState, error) {
+func (sm *StateManager) CreateCheckpoint(name string) (*api.EflintSavedState, error) {
 	return sm.SaveStateToFile("checkpoint-" + name)
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/service"
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	"go.uber.org/zap"
@@ -83,7 +82,7 @@ func (app *Application) handlePolicyUpdate(ctx context.Context, grpcMsg *pb.Side
 	validationResponse := app.validationService.ValidateRequest(ctx, requestApproval)
 
 	// Override the type for policy updates
-	validationResponse.Type = service.MessageTypePolicyUpdate
+	validationResponse.Type = "policyUpdate"
 
 	// Set up the policy update response
 	policyUpdate.ValidationResponse = validationResponse

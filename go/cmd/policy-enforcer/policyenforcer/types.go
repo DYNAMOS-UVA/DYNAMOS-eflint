@@ -41,13 +41,6 @@ func (r *ValidateRequestParams) ToReasonerParams() reasoner.RequestParams {
 // Response Types
 // -----------------------------------------------------------------------------
 
-// AllowedClausesResponse represents the response containing allowed clauses.
-type AllowedClausesResponse struct {
-	Organization string   `json:"organization"` // The organization/steward
-	Requester    string   `json:"requester"`    // The user/requester
-	Values       []string `json:"values"`       // List of allowed values
-}
-
 // AllAllowedClausesResponse contains all allowed clauses for a requester at an organization.
 type AllAllowedClausesResponse struct {
 	Organization     string   `json:"organization"`      // The organization/steward
@@ -76,8 +69,3 @@ type ErrorResponse struct {
 	Error string `json:"error"` // Human-readable error message
 }
 
-// ReasonerInfoResponse provides information about the active reasoner.
-type ReasonerInfoResponse struct {
-	Name    string `json:"name"`    // Name/type of the reasoner (e.g., "eflint", "symboleo")
-	Running bool   `json:"running"` // Whether the reasoner is operational
-}

@@ -14,17 +14,59 @@ import (
 
 // InstanceAPIHandler handles HTTP requests for eFLINT instance lifecycle management.
 // It provides endpoints for starting, stopping, and sending commands to the eFLINT server.
+// When an instance_id is provided, the handler targets a specific pool instance;
+// otherwise, it falls back to the default manager.
 type InstanceAPIHandler struct {
-	manager *Manager
+	manager *Manager       // Default manager for backward compatibility
+	pool    *InstancePool  // Pool for instance_id-based lookups
 	logger  *zap.Logger
 }
 
-// NewInstanceAPIHandler creates a new instance API handler with the given manager and logger.
-func NewInstanceAPIHandler(manager *Manager, logger *zap.Logger) *InstanceAPIHandler {
+// NewInstanceAPIHandler creates a new instance API handler with the given manager, pool, and logger.
+func NewInstanceAPIHandler(manager *Manager, pool *InstancePool, logger *zap.Logger) *InstanceAPIHandler {
 	return &InstanceAPIHandler{
 		manager: manager,
+		pool:    pool,
 		logger:  logger,
 	}
+}
+
+// resolveManager returns the manager for the given request.
+// If instance_id is provided (query param or body field), it looks up the pool entry.
+// Otherwise, it returns the default manager.
+func (h *InstanceAPIHandler) resolveManager(r *http.Request) (*Manager, error) {
+	instanceID := r.URL.Query().Get("instance_id")
+	if instanceID == "" {
+		return h.manager, nil
+	}
+
+	if h.pool == nil {
+		return h.manager, nil
+	}
+
+	entry, err := h.pool.GetByID(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Manager, nil
+}
+
+// resolveManagerFromBody resolves a manager using instance_id from a JSON request body.
+// The instanceID field is extracted from the body struct before calling this.
+func (h *InstanceAPIHandler) resolveManagerByID(instanceID string) (*Manager, error) {
+	if instanceID == "" {
+		return h.manager, nil
+	}
+
+	if h.pool == nil {
+		return h.manager, nil
+	}
+
+	entry, err := h.pool.GetByID(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Manager, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -50,7 +92,18 @@ type StartRequest struct {
 // - A string containing the JSON command (for backward compatibility)
 // - A JSON object that will be serialized before sending to eFLINT
 type CommandRequest struct {
-	Command json.RawMessage `json:"command"` // The JSON command to send to eFLINT (string or object)
+	Command    json.RawMessage `json:"command"`               // The JSON command to send to eFLINT (string or object)
+	InstanceID string          `json:"instance_id,omitempty"` // Optional: target a specific pool instance
+}
+
+// StopRequest represents the request body for stopping an instance.
+type StopRequest struct {
+	InstanceID string `json:"instance_id,omitempty"` // Optional: target a specific pool instance
+}
+
+// RestartRequest represents the request body for restarting an instance.
+type RestartRequest struct {
+	InstanceID string `json:"instance_id,omitempty"` // Optional: target a specific pool instance
 }
 
 // CommandResponse represents the response from a command execution.
@@ -58,16 +111,32 @@ type CommandResponse struct {
 	Parsed json.RawMessage `json:"response"` // The parsed JSON response from eFLINT
 }
 
-// ErrorResponse represents an error response returned by the API.
-type ErrorResponse struct {
-	Error string `json:"error"` // Human-readable error message
-}
-
 // AllowedArchetypesResponse represents the response for querying allowed archetypes.
 type AllowedArchetypesResponse struct {
 	Organization string   `json:"organization"` // The organization/steward
 	Requester    string   `json:"requester"`    // The user/requester
 	Archetypes   []string `json:"archetypes"`   // List of allowed archetypes
+}
+
+// InstanceListResponse represents the response for listing all pool instances.
+type InstanceListResponse struct {
+	Instances []InstanceInfo `json:"instances"`
+	Total     int            `json:"total"`
+	Available int            `json:"available"`
+}
+
+// PoolSizeResponse represents the response for pool size queries.
+type PoolSizeResponse struct {
+	TargetSize int `json:"target_size"`
+	Total      int `json:"total"`
+	Idle       int `json:"idle"`
+	InUse      int `json:"in_use"`
+	Unhealthy  int `json:"unhealthy"`
+}
+
+// PoolSizeRequest represents the request body for changing pool size.
+type PoolSizeRequest struct {
+	TargetSize int `json:"target_size"`
 }
 
 // -----------------------------------------------------------------------------
@@ -141,16 +210,16 @@ func parseCommandToString(raw json.RawMessage) (string, error) {
 // -----------------------------------------------------------------------------
 
 // GetStatus returns the current status of the eFLINT instance.
-// If the instance is running, it also sends a "status" command to the eFLINT server
-// to retrieve detailed information about the current state.
-// GET /eflint/status
+// If instance_id query param is provided, returns status of that pool instance.
+// GET /eflint/status?instance_id=X
 func (h *InstanceAPIHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	mgr, err := h.resolveManager(r)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
-	status := h.manager.Status()
+	status := mgr.Status()
 
 	response := StatusResponse{
 		Running:       status.Running,
@@ -160,7 +229,7 @@ func (h *InstanceAPIHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 
 	// If the instance is running, query the eFLINT server for its status
 	if status.Running {
-		eflintStatus, err := h.manager.GetEflintStatus()
+		eflintStatus, err := mgr.GetEflintStatus()
 		if err != nil {
 			h.logger.Warn("failed to get eFLINT server status", zap.Error(err))
 			// Continue without the eFLINT status - the instance might still be starting up
@@ -175,13 +244,8 @@ func (h *InstanceAPIHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 // Start starts the eFLINT instance with the given model.
 // If an instance is already running and force=false, returns a conflict error.
 // If force=true, the existing instance is stopped and a new one is started.
-// POST /eflint/start
+// POST /eflint/start (operates on the default manager, not pool instances)
 func (h *InstanceAPIHandler) Start(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var req StartRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -216,12 +280,17 @@ func (h *InstanceAPIHandler) Start(w http.ResponseWriter, r *http.Request) {
 // Stop stops the running eFLINT instance.
 // POST /eflint/stop
 func (h *InstanceAPIHandler) Stop(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	var req StopRequest
+	// Try to decode body, but don't fail if empty (backward compatible)
+	_ = httpapi.DecodeJSON(r, &req)
+
+	mgr, err := h.resolveManagerByID(req.InstanceID)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
-	if err := h.manager.Stop(); err != nil {
+	if err := mgr.Stop(); err != nil {
 		if err == ErrInstanceNotFound {
 			httpapi.WriteError(w, http.StatusNotFound, "no instance running")
 			return
@@ -234,18 +303,45 @@ func (h *InstanceAPIHandler) Stop(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, StatusResponse{Running: false})
 }
 
+// Restart restarts the eFLINT instance.
+// POST /eflint/restart
+func (h *InstanceAPIHandler) Restart(w http.ResponseWriter, r *http.Request) {
+	var req RestartRequest
+	_ = httpapi.DecodeJSON(r, &req)
+
+	mgr, err := h.resolveManagerByID(req.InstanceID)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	if err := mgr.Restart(); err != nil {
+		if err == ErrInstanceNotFound {
+			httpapi.WriteError(w, http.StatusNotFound, "no instance running")
+			return
+		}
+		h.logger.Error("failed to restart instance", zap.Error(err))
+		httpapi.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	status := mgr.Status()
+	httpapi.WriteJSON(w, http.StatusOK, StatusResponse{
+		Running:       status.Running,
+		Port:          status.Port,
+		ModelLocation: status.ModelLocation,
+	})
+}
+
 // SendCommand sends a command to the eFLINT instance.
 // POST /eflint/command
 //
 // The command field can be either:
 //   - A string containing the JSON command: {"command": "{\"command\": \"status\"}"}
 //   - A JSON object that will be serialized: {"command": {"command": "status"}}
+//
+// Optionally specify instance_id to target a specific pool instance.
 func (h *InstanceAPIHandler) SendCommand(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var req CommandRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -257,6 +353,12 @@ func (h *InstanceAPIHandler) SendCommand(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	mgr, err := h.resolveManagerByID(req.InstanceID)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
 	// Convert the command to a string that can be sent to eFLINT
 	commandStr, err := parseCommandToString(req.Command)
 	if err != nil {
@@ -264,7 +366,7 @@ func (h *InstanceAPIHandler) SendCommand(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	response, err := h.manager.SendCommand(commandStr)
+	response, err := mgr.SendCommand(commandStr)
 	if err != nil {
 		if err == ErrInstanceNotFound {
 			httpapi.WriteError(w, http.StatusNotFound, "no instance running")
@@ -292,6 +394,79 @@ func (h *InstanceAPIHandler) SendCommand(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// NOTE: GetAllowedArchetypes and similar policy query methods have been moved to
-// the /policy-enforcer API group. This provides a reasoner-agnostic interface that
-// can work with different policy reasoning engines (eFLINT, Symboleo, JSON-based, etc.).
+// -----------------------------------------------------------------------------
+// Pool Management Endpoints
+// -----------------------------------------------------------------------------
+
+// ListInstances returns a list of all pool instances with their statuses.
+// GET /eflint/instances
+func (h *InstanceAPIHandler) ListInstances(w http.ResponseWriter, r *http.Request) {
+	if h.pool == nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, "instance pool not configured")
+		return
+	}
+
+	instances := h.pool.ListInstances()
+	_, idle, _, _ := h.pool.PoolStats()
+
+	httpapi.WriteJSON(w, http.StatusOK, InstanceListResponse{
+		Instances: instances,
+		Total:     len(instances),
+		Available: idle,
+	})
+}
+
+// GetPoolSize returns the current pool target size and actual counts.
+// GET /eflint/instances/pool-size
+func (h *InstanceAPIHandler) GetPoolSize(w http.ResponseWriter, r *http.Request) {
+	if h.pool == nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, "instance pool not configured")
+		return
+	}
+
+	total, idle, inUse, unhealthy := h.pool.PoolStats()
+
+	httpapi.WriteJSON(w, http.StatusOK, PoolSizeResponse{
+		TargetSize: h.pool.GetTargetSize(),
+		Total:      total,
+		Idle:       idle,
+		InUse:      inUse,
+		Unhealthy:  unhealthy,
+	})
+}
+
+// SetPoolSize adjusts the pool target size at runtime.
+// PUT /eflint/instances/pool-size
+func (h *InstanceAPIHandler) SetPoolSize(w http.ResponseWriter, r *http.Request) {
+	if h.pool == nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, "instance pool not configured")
+		return
+	}
+
+	var req PoolSizeRequest
+	if err := httpapi.DecodeJSON(r, &req); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TargetSize < 1 {
+		httpapi.WriteError(w, http.StatusBadRequest, "target_size must be at least 1")
+		return
+	}
+
+	if err := h.pool.Resize(req.TargetSize); err != nil {
+		h.logger.Error("failed to resize pool", zap.Error(err))
+		httpapi.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	total, idle, inUse, unhealthy := h.pool.PoolStats()
+
+	httpapi.WriteJSON(w, http.StatusOK, PoolSizeResponse{
+		TargetSize: h.pool.GetTargetSize(),
+		Total:      total,
+		Idle:       idle,
+		InUse:      inUse,
+		Unhealthy:  unhealthy,
+	})
+}

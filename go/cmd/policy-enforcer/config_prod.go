@@ -28,3 +28,6 @@ var eflintMinPort = 1025
 var eflintMaxPort = 65535
 var eflintStateDir = "/app/eflint-states"
 var autoStartEflint = true
+var eflintPoolSize = 3
+var eflintHealthCheckInterval = 10 * time.Second
+var eflintAcquireTimeout = 30 * time.Second

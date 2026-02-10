@@ -6,6 +6,8 @@ dist
 dynamos.egg.info/*
 *dynamos.egg-info
 .obsidian/
+.cursor/
+.github/
 .venv
 .query
 # Binaries for programs and plugins

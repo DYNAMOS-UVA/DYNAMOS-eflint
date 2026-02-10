@@ -9,24 +9,28 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/eflint"
+	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
 )
 
 // -----------------------------------------------------------------------------
 // eFLINT Reasoner Implementation
 // -----------------------------------------------------------------------------
 
-// EflintReasoner implements the Reasoner interface using an eFLINT server.
-// It translates Reasoner API calls into eFLINT commands and parses the responses.
+// EflintReasoner implements the Reasoner interface using an eFLINT server pool.
+// For each request it acquires an idle instance from the pool, loads the
+// organization's eFLINT model, executes the query, and releases the instance.
 type EflintReasoner struct {
-	manager *eflint.Manager
-	logger  *zap.Logger
+	pool      *eflint.InstancePool
+	modelRepo repository.EflintModelRepository
+	logger    *zap.Logger
 }
 
-// NewEflintReasoner creates a new eFLINT-based reasoner.
-func NewEflintReasoner(manager *eflint.Manager, logger *zap.Logger) *EflintReasoner {
+// NewEflintReasoner creates a new eFLINT-based reasoner backed by an instance pool.
+func NewEflintReasoner(pool *eflint.InstancePool, modelRepo repository.EflintModelRepository, logger *zap.Logger) *EflintReasoner {
 	return &EflintReasoner{
-		manager: manager,
-		logger:  logger,
+		pool:      pool,
+		modelRepo: modelRepo,
+		logger:    logger,
 	}
 }
 
@@ -35,20 +39,246 @@ func (r *EflintReasoner) Name() string {
 	return "eflint"
 }
 
-// IsRunning checks if the eFLINT server is running.
+// IsRunning checks if the eFLINT instance pool is operational.
 func (r *EflintReasoner) IsRunning() bool {
-	return r.manager.IsRunning()
+	return r.pool.GetTargetSize() > 0
 }
 
 // -----------------------------------------------------------------------------
-// Facts Retrieval
+// Pool Lifecycle Helper
 // -----------------------------------------------------------------------------
 
-// FetchFacts retrieves all facts from the eFLINT server.
-// This can be used to fetch facts once and then filter them multiple times
-// without making repeated calls to the eFLINT server.
-func (r *EflintReasoner) FetchFacts(ctx context.Context) ([]eflintFact, error) {
-	response, err := r.manager.SendCommand(`{"command": "facts"}`)
+// withLoadedInstance acquires an instance from the pool, loads the eFLINT model
+// for the given organization, and calls fn with the entry's Manager. The instance
+// is released asynchronously after fn completes.
+func (r *EflintReasoner) withLoadedInstance(ctx context.Context, organization string, fn func(mgr *eflint.Manager) error) error {
+	entry, err := r.pool.Acquire()
+	if err != nil {
+		return fmt.Errorf("failed to acquire eFLINT instance: %w", err)
+	}
+
+	modelText, found, err := r.modelRepo.GetEflintModel(organization)
+	if err != nil {
+		r.logger.Error("failed to retrieve eFLINT model",
+			zap.String("organization", organization),
+			zap.Error(err),
+		)
+		go r.pool.Release(entry)
+		return fmt.Errorf("failed to retrieve eFLINT model for %s: %w", organization, err)
+	}
+	if !found {
+		r.logger.Error("eFLINT model not found for organization",
+			zap.String("organization", organization),
+		)
+		go r.pool.Release(entry)
+		return fmt.Errorf("eFLINT model not found for organization %s", organization)
+	}
+
+	if _, err := entry.Manager.SendPhrases(modelText); err != nil {
+		r.logger.Error("failed to load eFLINT specification",
+			zap.String("organization", organization),
+			zap.Error(err),
+		)
+		go r.pool.Release(entry)
+		return fmt.Errorf("failed to load eFLINT specification: %w", err)
+	}
+
+	err = fn(entry.Manager)
+	go r.pool.Release(entry)
+	return err
+}
+
+// -----------------------------------------------------------------------------
+// Allowed Clauses Retrieval
+// -----------------------------------------------------------------------------
+
+// GetAllowedRequestTypes returns all request types allowed for a requester at an organization.
+func (r *EflintReasoner) GetAllowedRequestTypes(ctx context.Context, organization, requester string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAllowedClauses(facts, "allowed-request-type", "request-type", organization, requester)
+		return nil
+	})
+
+	return result, err
+}
+
+// GetAllowedDataSets returns all datasets allowed for a requester at an organization.
+func (r *EflintReasoner) GetAllowedDataSets(ctx context.Context, organization, requester string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAllowedClauses(facts, "allowed-data-set", "data-set", organization, requester)
+		return nil
+	})
+
+	return result, err
+}
+
+// GetAllowedArchetypes returns all archetypes allowed for a requester at an organization.
+func (r *EflintReasoner) GetAllowedArchetypes(ctx context.Context, organization, requester string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAllowedClauses(facts, "allowed-archetype", "archetype", organization, requester)
+		return nil
+	})
+
+	return result, err
+}
+
+// GetAllowedComputeProviders returns all compute providers allowed for a requester at an organization.
+func (r *EflintReasoner) GetAllowedComputeProviders(ctx context.Context, organization, requester string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAllowedClauses(facts, "allowed-compute-provider", "compute-provider", organization, requester)
+		return nil
+	})
+
+	return result, err
+}
+
+// GetAllAllowedClauses returns all allowed clauses for a requester at an organization.
+// This is more efficient than calling the individual methods because it only acquires
+// one instance and fetches facts once.
+func (r *EflintReasoner) GetAllAllowedClauses(ctx context.Context, organization, requester string) (*AllAllowedClauses, error) {
+	var result *AllAllowedClauses
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+
+		result = &AllAllowedClauses{
+			RequestTypes:     filterAllowedClauses(facts, "allowed-request-type", "request-type", organization, requester),
+			DataSets:         filterAllowedClauses(facts, "allowed-data-set", "data-set", organization, requester),
+			Archetypes:       filterAllowedClauses(facts, "allowed-archetype", "archetype", organization, requester),
+			ComputeProviders: filterAllowedClauses(facts, "allowed-compute-provider", "compute-provider", organization, requester),
+		}
+		return nil
+	})
+
+	return result, err
+}
+
+// -----------------------------------------------------------------------------
+// Request Validation
+// -----------------------------------------------------------------------------
+
+// IsRequestAllowed checks if a specific request is permitted according to the eFLINT policy.
+// It uses the "enabled" command on the submit-request act to determine if the request is allowed.
+func (r *EflintReasoner) IsRequestAllowed(ctx context.Context, params RequestParams) (*RequestValidationResult, error) {
+	var result *RequestValidationResult
+
+	err := r.withLoadedInstance(ctx, params.Organization, func(mgr *eflint.Manager) error {
+		// Build the eFLINT "enabled" command with a properly structured VALUE
+		// This checks if the submit-request action is enabled with the given parameters
+		cmd := map[string]interface{}{
+			"command": "enabled",
+			"value": map[string]interface{}{
+				"fact-type": "submit-request",
+				"value": []map[string]interface{}{
+					{"fact-type": "req", "value": params.Requester},
+					{"fact-type": "org", "value": params.Organization},
+					{"fact-type": "rtype", "value": params.RequestType},
+					{"fact-type": "dataset", "value": params.DataSet},
+					{"fact-type": "arch", "value": params.Archetype},
+					{"fact-type": "provider", "value": params.ComputeProvider},
+				},
+			},
+		}
+
+		cmdJSON, err := json.Marshal(cmd)
+		if err != nil {
+			return fmt.Errorf("failed to marshal command: %w", err)
+		}
+
+		response, err := mgr.SendCommand(string(cmdJSON))
+		if err != nil {
+			return fmt.Errorf("failed to query eFLINT: %w", err)
+		}
+
+		r.logger.Debug("eFLINT enabled query response", zap.String("command", string(cmdJSON)))
+
+		result, err = parseValidationResponse(response, params)
+		return err
+	})
+
+	return result, err
+}
+
+// -----------------------------------------------------------------------------
+// Availability Provider Implementation
+// -----------------------------------------------------------------------------
+
+// GetAvailableArchetypes returns archetypes available at an organization.
+func (r *EflintReasoner) GetAvailableArchetypes(ctx context.Context, organization string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAvailableFacts(facts, "available-archetype", "archetype", organization)
+		return nil
+	})
+
+	return result, err
+}
+
+// GetAvailableComputeProviders returns compute providers available at an organization.
+func (r *EflintReasoner) GetAvailableComputeProviders(ctx context.Context, organization string) ([]string, error) {
+	var result []string
+
+	err := r.withLoadedInstance(ctx, organization, func(mgr *eflint.Manager) error {
+		facts, err := fetchFacts(mgr)
+		if err != nil {
+			return err
+		}
+		result = filterAvailableFacts(facts, "available-compute-provider", "compute-provider", organization)
+		return nil
+	})
+
+	return result, err
+}
+
+// -----------------------------------------------------------------------------
+// Helper Types and Functions
+// -----------------------------------------------------------------------------
+
+// eflintFact represents a fact from the eFLINT facts response.
+type eflintFact struct {
+	FactType   string `json:"fact-type"`
+	TaggedType string `json:"tagged-type"`
+	Arguments  []struct {
+		FactType string `json:"fact-type"`
+		Value    string `json:"value"`
+	} `json:"arguments"`
+}
+
+// fetchFacts sends the "facts" command to the given manager and parses the response.
+func fetchFacts(mgr *eflint.Manager) ([]eflintFact, error) {
+	response, err := mgr.SendCommand(`{"command": "facts"}`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get facts from eFLINT: %w", err)
 	}
@@ -61,68 +291,22 @@ func (r *EflintReasoner) FetchFacts(ctx context.Context) ([]eflintFact, error) {
 	return facts, nil
 }
 
-// -----------------------------------------------------------------------------
-// Allowed Clauses Retrieval
-// -----------------------------------------------------------------------------
-
-// GetAllowedRequestTypes returns all request types allowed for a requester at an organization.
-func (r *EflintReasoner) GetAllowedRequestTypes(ctx context.Context, organization, requester string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
+// parseFactsResponse parses the JSON response from an eFLINT "facts" command.
+func parseFactsResponse(response string) ([]eflintFact, error) {
+	var factsResponse struct {
+		Values []eflintFact `json:"values"`
 	}
-	return r.filterAllowedClauses(facts, "allowed-request-type", "request-type", organization, requester), nil
-}
 
-// GetAllowedDataSets returns all datasets allowed for a requester at an organization.
-func (r *EflintReasoner) GetAllowedDataSets(ctx context.Context, organization, requester string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.filterAllowedClauses(facts, "allowed-data-set", "data-set", organization, requester), nil
-}
-
-// GetAllowedArchetypes returns all archetypes allowed for a requester at an organization.
-func (r *EflintReasoner) GetAllowedArchetypes(ctx context.Context, organization, requester string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.filterAllowedClauses(facts, "allowed-archetype", "archetype", organization, requester), nil
-}
-
-// GetAllowedComputeProviders returns all compute providers allowed for a requester at an organization.
-func (r *EflintReasoner) GetAllowedComputeProviders(ctx context.Context, organization, requester string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.filterAllowedClauses(facts, "allowed-compute-provider", "compute-provider", organization, requester), nil
-}
-
-// GetAllAllowedClauses returns all allowed clauses for a requester at an organization.
-// This is more efficient than calling the individual methods because it only fetches
-// facts from the eFLINT server once.
-func (r *EflintReasoner) GetAllAllowedClauses(ctx context.Context, organization, requester string) (*AllAllowedClauses, error) {
-	// Fetch facts once
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
+	if err := json.Unmarshal([]byte(response), &factsResponse); err != nil {
 		return nil, err
 	}
 
-	// Filter all clause types from the same facts
-	return &AllAllowedClauses{
-		RequestTypes:     r.filterAllowedClauses(facts, "allowed-request-type", "request-type", organization, requester),
-		DataSets:         r.filterAllowedClauses(facts, "allowed-data-set", "data-set", organization, requester),
-		Archetypes:       r.filterAllowedClauses(facts, "allowed-archetype", "archetype", organization, requester),
-		ComputeProviders: r.filterAllowedClauses(facts, "allowed-compute-provider", "compute-provider", organization, requester),
-	}, nil
+	return factsResponse.Values, nil
 }
 
 // filterAllowedClauses filters pre-fetched facts for allowed clauses.
 // This is a pure function that doesn't make any network calls.
-func (r *EflintReasoner) filterAllowedClauses(
+func filterAllowedClauses(
 	facts []eflintFact,
 	factType string, // e.g., "allowed-archetype"
 	valueFactType string, // e.g., "archetype"
@@ -145,56 +329,31 @@ func (r *EflintReasoner) filterAllowedClauses(
 	return values
 }
 
-// -----------------------------------------------------------------------------
-// Request Validation
-// -----------------------------------------------------------------------------
-
-// IsRequestAllowed checks if a specific request is permitted according to the eFLINT policy.
-// It uses the "enabled" command on the submit-request act to determine if the request is allowed.
-func (r *EflintReasoner) IsRequestAllowed(ctx context.Context, params RequestParams) (*RequestValidationResult, error) {
-	// Build the eFLINT "enabled" command with a properly structured VALUE
-	// This checks if the submit-request action is enabled with the given parameters
-	cmd := map[string]interface{}{
-		"command": "enabled",
-		"value": map[string]interface{}{
-			"fact-type": "submit-request",
-			"value": []map[string]interface{}{
-				{"fact-type": "req", "value": params.Requester},
-				{"fact-type": "org", "value": params.Organization},
-				{"fact-type": "rtype", "value": params.RequestType},
-				{"fact-type": "dataset", "value": params.DataSet},
-				{"fact-type": "arch", "value": params.Archetype},
-				{"fact-type": "provider", "value": params.ComputeProvider},
-			},
-		},
+// filterAvailableFacts filters pre-fetched facts for available resources at an organization.
+// This is a pure function that doesn't make any network calls.
+func filterAvailableFacts(
+	facts []eflintFact,
+	factType string,
+	valueFactType string,
+	organization string,
+) []string {
+	var values []string
+	for _, fact := range facts {
+		if fact.FactType == factType && len(fact.Arguments) >= 2 {
+			// Arguments: [0]=organization, [1]=value
+			if fact.Arguments[0].FactType == "organization" &&
+				fact.Arguments[0].Value == organization &&
+				fact.Arguments[1].FactType == valueFactType {
+				values = append(values, fact.Arguments[1].Value)
+			}
+		}
 	}
-
-	cmdJSON, err := json.Marshal(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal command: %w", err)
-	}
-
-	response, err := r.manager.SendCommand(string(cmdJSON))
-	if err != nil {
-		return nil, fmt.Errorf("failed to query eFLINT: %w", err)
-	}
-
-	r.logger.Debug("eFLINT enabled query response",
-		zap.String("command", string(cmdJSON)),
-		zap.String("response", response),
-	)
-
-	// Parse the response and include raw response for debugging
-	result, err := r.parseValidationResponse(response, params)
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
+	return values
 }
 
 // parseValidationResponse parses the eFLINT response for an "enabled" query.
 // The enabled command returns a Status response with query-results containing "success" if enabled.
-func (r *EflintReasoner) parseValidationResponse(response string, params RequestParams) (*RequestValidationResult, error) {
+func parseValidationResponse(response string, params RequestParams) (*RequestValidationResult, error) {
 	var resp struct {
 		Response     string   `json:"response"`
 		QueryResults []string `json:"query-results"` // eFLINT returns "success" when enabled
@@ -238,77 +397,6 @@ func (r *EflintReasoner) parseValidationResponse(response string, params Request
 	}
 
 	return result, nil
-}
-
-// -----------------------------------------------------------------------------
-// Availability Provider Implementation
-// -----------------------------------------------------------------------------
-
-// GetAvailableArchetypes returns archetypes available at an organization.
-func (r *EflintReasoner) GetAvailableArchetypes(ctx context.Context, organization string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.filterAvailableFacts(facts, "available-archetype", "archetype", organization), nil
-}
-
-// GetAvailableComputeProviders returns compute providers available at an organization.
-func (r *EflintReasoner) GetAvailableComputeProviders(ctx context.Context, organization string) ([]string, error) {
-	facts, err := r.FetchFacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return r.filterAvailableFacts(facts, "available-compute-provider", "compute-provider", organization), nil
-}
-
-// filterAvailableFacts filters pre-fetched facts for available resources at an organization.
-// This is a pure function that doesn't make any network calls.
-func (r *EflintReasoner) filterAvailableFacts(
-	facts []eflintFact,
-	factType string,
-	valueFactType string,
-	organization string,
-) []string {
-	var values []string
-	for _, fact := range facts {
-		if fact.FactType == factType && len(fact.Arguments) >= 2 {
-			// Arguments: [0]=organization, [1]=value
-			if fact.Arguments[0].FactType == "organization" &&
-				fact.Arguments[0].Value == organization &&
-				fact.Arguments[1].FactType == valueFactType {
-				values = append(values, fact.Arguments[1].Value)
-			}
-		}
-	}
-	return values
-}
-
-// -----------------------------------------------------------------------------
-// Helper Types and Functions
-// -----------------------------------------------------------------------------
-
-// eflintFact represents a fact from the eFLINT facts response.
-type eflintFact struct {
-	FactType   string `json:"fact-type"`
-	TaggedType string `json:"tagged-type"`
-	Arguments  []struct {
-		FactType string `json:"fact-type"`
-		Value    string `json:"value"`
-	} `json:"arguments"`
-}
-
-// parseFactsResponse parses the JSON response from an eFLINT "facts" command.
-func parseFactsResponse(response string) ([]eflintFact, error) {
-	var factsResponse struct {
-		Values []eflintFact `json:"values"`
-	}
-
-	if err := json.Unmarshal([]byte(response), &factsResponse); err != nil {
-		return nil, err
-	}
-
-	return factsResponse.Values, nil
 }
 
 // Ensure EflintReasoner implements the interfaces

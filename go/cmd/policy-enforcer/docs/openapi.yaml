@@ -10,8 +10,8 @@ info:
     High-level, reasoner-agnostic interface for policy validation. This API is designed
     to work with different reasoning engines (eFLINT, Symboleo, JSON-based, etc.) through
     a common interface. Use these endpoints for:
-    - **Allowed Clauses**: Query what request types, datasets, archetypes, and compute providers
-      are allowed for a specific requester at an organization
+    - **Allowed Clauses**: Query all allowed request types, datasets, archetypes, and compute
+      providers for a specific requester at an organization in a single call
     - **Request Validation**: Check if a specific data request is permitted by the policy
     
     ## eFLINT API (`/eflint/*`)
@@ -64,10 +64,14 @@ paths:
   /eflint/status:
     get:
       summary: Get instance status
-      description: Returns the current status of the eFLINT server instance
+      description: |
+        Returns the current status of the eFLINT server instance.
+        If instance_id is provided, returns the status of that specific pool instance.
       operationId: getStatus
       tags:
         - Instance Management
+      parameters:
+        - $ref: '#/components/parameters/InstanceIdParam'
       responses:
         '200':
           description: Status retrieved successfully
@@ -75,6 +79,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusResponse'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /eflint/start:
     post:
@@ -133,10 +143,22 @@ paths:
   /eflint/stop:
     post:
       summary: Stop instance
-      description: Stops the running eFLINT server instance
+      description: |
+        Stops the running eFLINT server instance.
+        Optionally specify instance_id in the request body to stop a specific pool instance.
       operationId: stopInstance
       tags:
         - Instance Management
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                instance_id:
+                  type: string
+                  description: Optional pool instance ID to target
+                  example: "instance-0"
       responses:
         '200':
           description: Instance stopped successfully
@@ -560,16 +582,142 @@ paths:
               schema:
                 $ref: '#/components/schemas/CommandResponse'
 
+  /eflint/restart:
+    post:
+      summary: Restart instance
+      description: |
+        Restarts the eFLINT server instance with the same model.
+        Optionally specify instance_id to restart a specific pool instance.
+      operationId: restartInstance
+      tags:
+        - Instance Management
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                instance_id:
+                  type: string
+                  description: Optional pool instance ID to target
+                  example: "instance-0"
+      responses:
+        '200':
+          description: Instance restarted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '404':
+          description: No instance running or instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Pool Management Endpoints
+  # ---------------------------------------------------------------------------
+  /eflint/instances:
+    get:
+      summary: List all pool instances
+      description: |
+        Returns a list of all eFLINT server instances in the pool with their current status.
+        Each instance has a stable ID, a status (idle, in_use, unhealthy), and connection details.
+      operationId: listInstances
+      tags:
+        - Pool Management
+      responses:
+        '200':
+          description: Instances listed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceListResponse'
+        '503':
+          description: Instance pool not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /eflint/instances/pool-size:
+    get:
+      summary: Get pool size
+      description: Returns the current target pool size and actual instance counts.
+      operationId: getPoolSize
+      tags:
+        - Pool Management
+      responses:
+        '200':
+          description: Pool size retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolSizeResponse'
+        '503':
+          description: Instance pool not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      summary: Set pool size
+      description: |
+        Adjusts the target pool size at runtime.
+        New instances spin up asynchronously via the health monitor.
+        Excess idle instances are gracefully stopped.
+      operationId: setPoolSize
+      tags:
+        - Pool Management
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoolSizeRequest'
+            example:
+              target_size: 5
+      responses:
+        '200':
+          description: Pool size updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolSizeResponse'
+        '400':
+          description: Bad request - target_size must be at least 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Instance pool not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   # ---------------------------------------------------------------------------
   # State Management Endpoints (POC)
   # ---------------------------------------------------------------------------
   /eflint/state:
     get:
       summary: Get current state
-      description: Retrieves the current execution graph state of the eFLINT instance
+      description: |
+        Retrieves the current execution graph state of the eFLINT instance.
+        If instance_id is provided, returns the state of that specific pool instance.
       operationId: getState
       tags:
         - State Management
+      parameters:
+        - $ref: '#/components/parameters/InstanceIdParam'
       responses:
         '200':
           description: State retrieved successfully
@@ -823,180 +971,13 @@ paths:
   # ---------------------------------------------------------------------------
   # Policy Enforcer Endpoints (Reasoner-Agnostic)
   # ---------------------------------------------------------------------------
-  /policy-enforcer/info:
-    get:
-      summary: Get reasoner info
-      description: Returns information about the active reasoning engine
-      operationId: getReasonerInfo
-      tags:
-        - Policy Enforcer
-      responses:
-        '200':
-          description: Reasoner info retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ReasonerInfoResponse'
-
-  /policy-enforcer/allowed-request-types:
-    get:
-      summary: Get allowed request types
-      description: |
-        Returns all request types that are allowed for a requester at an organization.
-        This is a reasoner-agnostic endpoint that works with any configured reasoning engine.
-      operationId: getAllowedRequestTypes
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationParam'
-        - $ref: '#/components/parameters/RequesterParam'
-      responses:
-        '200':
-          description: Allowed request types retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AllowedClausesResponse'
-        '400':
-          description: Bad request - missing required parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /policy-enforcer/allowed-data-sets:
-    get:
-      summary: Get allowed data sets
-      description: |
-        Returns all datasets that are allowed for a requester at an organization.
-        This is a reasoner-agnostic endpoint that works with any configured reasoning engine.
-      operationId: getAllowedDataSets
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationParam'
-        - $ref: '#/components/parameters/RequesterParam'
-      responses:
-        '200':
-          description: Allowed data sets retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AllowedClausesResponse'
-        '400':
-          description: Bad request - missing required parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /policy-enforcer/allowed-archetypes:
-    get:
-      summary: Get allowed archetypes
-      description: |
-        Returns all archetypes that are allowed for a requester at an organization.
-        This is a reasoner-agnostic endpoint that works with any configured reasoning engine.
-      operationId: getAllowedArchetypes
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationParam'
-        - $ref: '#/components/parameters/RequesterParam'
-      responses:
-        '200':
-          description: Allowed archetypes retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AllowedClausesResponse'
-        '400':
-          description: Bad request - missing required parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /policy-enforcer/allowed-compute-providers:
-    get:
-      summary: Get allowed compute providers
-      description: |
-        Returns all compute providers that are allowed for a requester at an organization.
-        This is a reasoner-agnostic endpoint that works with any configured reasoning engine.
-      operationId: getAllowedComputeProviders
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationParam'
-        - $ref: '#/components/parameters/RequesterParam'
-      responses:
-        '200':
-          description: Allowed compute providers retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AllowedClausesResponse'
-        '400':
-          description: Bad request - missing required parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
   /policy-enforcer/allowed-clauses:
     get:
       summary: Get all allowed clauses
       description: |
         Returns all allowed clauses (request types, data sets, archetypes, and compute providers)
         for a requester at an organization in a single request.
-        This is a convenience endpoint that combines all individual allowed-* endpoints.
+        This is the primary endpoint for querying what a requester is allowed to do.
       operationId: getAllAllowedClauses
       tags:
         - Policy Enforcer
@@ -1097,82 +1078,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /policy-enforcer/available-archetypes:
-    get:
-      summary: Get available archetypes for an organization
-      description: |
-        Returns all archetypes that are available at an organization level (not requester-specific).
-        These are archetypes that the organization has configured as options,
-        regardless of which requesters have been authorized to use them.
-      operationId: getAvailableArchetypes
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationOnlyParam'
-      responses:
-        '200':
-          description: Available archetypes retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AvailableValuesResponse'
-        '400':
-          description: Bad request - missing organization parameter
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /policy-enforcer/available-compute-providers:
-    get:
-      summary: Get available compute providers for an organization
-      description: |
-        Returns all compute providers that are available at an organization level (not requester-specific).
-        These are providers that the organization has configured as options,
-        regardless of which requesters have been authorized to use them.
-      operationId: getAvailableComputeProviders
-      tags:
-        - Policy Enforcer
-      parameters:
-        - $ref: '#/components/parameters/OrganizationOnlyParam'
-      responses:
-        '200':
-          description: Available compute providers retrieved successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AvailableComputeProvidersResponse'
-        '400':
-          description: Bad request - missing organization parameter
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
 # -----------------------------------------------------------------------------
 # Components
 # -----------------------------------------------------------------------------
@@ -1199,14 +1104,14 @@ components:
         type: string
       example: jorrit.stutterheim@cloudnation.nl
 
-    OrganizationOnlyParam:
-      name: organization
+    InstanceIdParam:
+      name: instance_id
       in: query
-      required: true
-      description: The organization identifier
+      required: false
+      description: Optional pool instance ID to target. If omitted, the default instance is used.
       schema:
         type: string
-      example: VU
+      example: "instance-0"
 
   # ---------------------------------------------------------------------------
   # Schemas
@@ -1281,6 +1186,10 @@ components:
             - type: string
               description: Command as JSON string (legacy, requires double-escaping)
               example: '{"command": "phrase", "text": "+example-fact(\\\"value\\\")."}'
+        instance_id:
+          type: string
+          description: Optional pool instance ID to target. If omitted, the default instance is used.
+          example: "instance-0"
 
     CommandResponse:
       type: object
@@ -1290,38 +1199,84 @@ components:
           description: The parsed JSON response from eFLINT
 
     # -------------------------------------------------------------------------
-    # Policy Enforcer Schemas
+    # Pool Management Schemas
     # -------------------------------------------------------------------------
-    ReasonerInfoResponse:
+    InstanceInfo:
       type: object
       properties:
-        name:
+        id:
           type: string
-          description: Name/type of the active reasoner
-          example: "eflint"
+          description: Stable identifier of the pool instance
+          example: "instance-0"
+        status:
+          type: string
+          enum: [idle, in_use, unhealthy]
+          description: Current pool status of the instance
+          example: "idle"
         running:
           type: boolean
-          description: Whether the reasoner is operational
+          description: Whether the underlying eFLINT server process is running
           example: true
+        port:
+          type: integer
+          description: The TCP port the instance is listening on
+          example: 12345
 
-    AllowedClausesResponse:
+    InstanceListResponse:
       type: object
       properties:
-        organization:
-          type: string
-          description: The organization/steward identifier
-          example: VU
-        requester:
-          type: string
-          description: The requester/user identifier
-          example: jorrit.stutterheim@cloudnation.nl
-        values:
+        instances:
           type: array
           items:
-            type: string
-          description: List of allowed values
-          example: ["sqlDataRequest", "genericRequest"]
+            $ref: '#/components/schemas/InstanceInfo'
+          description: List of all pool instances
+        total:
+          type: integer
+          description: Total number of instances in the pool
+          example: 3
+        available:
+          type: integer
+          description: Number of idle instances available for use
+          example: 2
 
+    PoolSizeResponse:
+      type: object
+      properties:
+        target_size:
+          type: integer
+          description: The desired number of healthy instances
+          example: 3
+        total:
+          type: integer
+          description: Total instances in the registry
+          example: 3
+        idle:
+          type: integer
+          description: Number of idle instances
+          example: 2
+        in_use:
+          type: integer
+          description: Number of instances currently in use
+          example: 1
+        unhealthy:
+          type: integer
+          description: Number of unhealthy instances
+          example: 0
+
+    PoolSizeRequest:
+      type: object
+      required:
+        - target_size
+      properties:
+        target_size:
+          type: integer
+          minimum: 1
+          description: The new desired pool size
+          example: 5
+
+    # -------------------------------------------------------------------------
+    # Policy Enforcer Schemas
+    # -------------------------------------------------------------------------
     AllAllowedClausesResponse:
       type: object
       properties:
@@ -1429,34 +1384,6 @@ components:
           description: The compute provider checked
           example: "SURF"
 
-    AvailableValuesResponse:
-      type: object
-      properties:
-        organization:
-          type: string
-          description: The organization identifier
-          example: "VU"
-        archetypes:
-          type: array
-          items:
-            type: string
-          description: List of available archetypes
-          example: ["computeToData", "dataThroughTtp", "reproducableScience"]
-
-    AvailableComputeProvidersResponse:
-      type: object
-      properties:
-        organization:
-          type: string
-          description: The organization identifier
-          example: "VU"
-        compute_providers:
-          type: array
-          items:
-            type: string
-          description: List of available compute providers
-          example: ["SURF", "otherCompany"]
-
     # -------------------------------------------------------------------------
     # State Management Schemas
     # -------------------------------------------------------------------------
@@ -1477,7 +1404,7 @@ components:
         model_location:
           type: string
           description: The model location when the state was saved
-          example: "/eflint/dynamos-agreement.eflint"
+          example: "/eflint/empty.eflint"
         graph:
           type: object
           description: The eFLINT execution graph
@@ -1605,6 +1532,12 @@ tags:
     description: |
       Low-level endpoints for managing the eFLINT server instance lifecycle.
       These are eFLINT-specific and should be used for debugging or direct server control.
+      Endpoints that accept an instance_id parameter can target specific pool instances.
+  - name: Pool Management
+    description: |
+      Endpoints for managing the eFLINT instance pool. The pool maintains a configurable
+      number of pre-started eFLINT server instances in an empty state for fast, stateless
+      validation. Use these endpoints to monitor pool health and dynamically scale the pool size.
   - name: State Management
     description: |
       Endpoints for getting, exporting, importing, and managing eFLINT state checkpoints (POC).

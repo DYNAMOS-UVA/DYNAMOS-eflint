@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/httpapi"
+	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"go.uber.org/zap"
 )
 
@@ -16,17 +17,39 @@ import (
 // StateAPIHandler handles HTTP requests for eFLINT state management.
 // This is a POC (Proof of Concept) for stateful session management with
 // state persistence, allowing export/import of eFLINT execution graphs.
+// When an instance_id is provided, it targets a specific pool instance.
 type StateAPIHandler struct {
-	stateManager *StateManager
+	stateManager *StateManager  // Default state manager
+	pool         *InstancePool  // Pool for instance_id-based lookups
 	logger       *zap.Logger
 }
 
-// NewStateAPIHandler creates a new StateAPIHandler with the given manager and logger.
-func NewStateAPIHandler(stateManager *StateManager, logger *zap.Logger) *StateAPIHandler {
+// NewStateAPIHandler creates a new StateAPIHandler with the given manager, pool, and logger.
+func NewStateAPIHandler(stateManager *StateManager, pool *InstancePool, logger *zap.Logger) *StateAPIHandler {
 	return &StateAPIHandler{
 		stateManager: stateManager,
+		pool:         pool,
 		logger:       logger,
 	}
+}
+
+// resolveStateManager returns the state manager for the given request.
+// If instance_id query param is provided, it resolves the pool entry's state manager.
+func (h *StateAPIHandler) resolveStateManager(r *http.Request) (*StateManager, error) {
+	instanceID := r.URL.Query().Get("instance_id")
+	if instanceID == "" {
+		return h.stateManager, nil
+	}
+
+	if h.pool == nil {
+		return h.stateManager, nil
+	}
+
+	entry, err := h.pool.GetByID(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	return entry.StateManager, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -35,14 +58,14 @@ func NewStateAPIHandler(stateManager *StateManager, logger *zap.Logger) *StateAP
 
 // ExportStateResponse represents the response for state export.
 type ExportStateResponse struct {
-	Success bool        `json:"success"`         // Whether the export was successful
-	State   *SavedState `json:"state,omitempty"` // The exported state data
-	Error   string      `json:"error,omitempty"` // Error message if failed
+	Success bool                  `json:"success"`         // Whether the export was successful
+	State   *api.EflintSavedState `json:"state,omitempty"` // The exported state data
+	Error   string                `json:"error,omitempty"` // Error message if failed
 }
 
 // ImportStateRequest represents the request body for importing state.
 type ImportStateRequest struct {
-	State *SavedState `json:"state"` // The state to import
+	State *api.EflintSavedState `json:"state"` // The state to import
 }
 
 // CheckpointRequest represents a request for checkpoint operations.
@@ -72,14 +95,15 @@ type StateResponse struct {
 // -----------------------------------------------------------------------------
 
 // GetState retrieves the current execution graph state of the eFLINT instance.
-// GET /eflint/state
+// GET /eflint/state?instance_id=X
 func (h *StateAPIHandler) GetState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	sm, err := h.resolveStateManager(r)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
-	response, err := h.stateManager.GetState()
+	response, err := sm.GetState()
 	if err != nil {
 		if err == ErrInstanceNotRunning {
 			httpapi.WriteError(w, http.StatusServiceUnavailable, "instance is not running")
@@ -106,11 +130,6 @@ func (h *StateAPIHandler) GetState(w http.ResponseWriter, r *http.Request) {
 // ExportState exports the current eFLINT state for persistence.
 // POST /eflint/state/export
 func (h *StateAPIHandler) ExportState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	state, err := h.stateManager.ExportState()
 	if err != nil {
 		if err == ErrInstanceNotRunning {
@@ -131,11 +150,6 @@ func (h *StateAPIHandler) ExportState(w http.ResponseWriter, r *http.Request) {
 // ImportState imports a previously exported state.
 // POST /eflint/state/import
 func (h *StateAPIHandler) ImportState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var req ImportStateRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -166,11 +180,6 @@ func (h *StateAPIHandler) ImportState(w http.ResponseWriter, r *http.Request) {
 // CreateCheckpoint creates a named checkpoint of the current state
 // POST /eflint/state/checkpoint
 func (h *StateAPIHandler) CreateCheckpoint(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var req CheckpointRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -206,11 +215,6 @@ func (h *StateAPIHandler) CreateCheckpoint(w http.ResponseWriter, r *http.Reques
 // NOTE: Due to a bug in the eFLINT server, full state restoration may not work.
 // In that case, the instance will be restarted to the initial model state.
 func (h *StateAPIHandler) RestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	var req CheckpointRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid request body")
@@ -256,11 +260,6 @@ func (h *StateAPIHandler) RestoreCheckpoint(w http.ResponseWriter, r *http.Reque
 // ListCheckpoints lists all available checkpoints
 // GET /eflint/state/checkpoints
 func (h *StateAPIHandler) ListCheckpoints(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	states, err := h.stateManager.ListSavedStates()
 	if err != nil {
 		h.logger.Error("failed to list checkpoints", zap.Error(err))
@@ -284,11 +283,6 @@ func (h *StateAPIHandler) ListCheckpoints(w http.ResponseWriter, r *http.Request
 // DeleteCheckpoint deletes a named checkpoint
 // DELETE /eflint/state/checkpoint/{name}
 func (h *StateAPIHandler) DeleteCheckpoint(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		httpapi.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	const prefix = "/eflint/state/checkpoint/"
 	name := strings.TrimPrefix(r.URL.Path, prefix)
 	if name == "" || name == "restore" {
