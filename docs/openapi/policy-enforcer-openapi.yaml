@@ -54,14 +54,13 @@ info:
     name: Niels Arts
 
 servers:
-  - url: http://localhost:8912
-    description: Local development server
-
+  - url: http://policy-enforcer.orchestrator.svc.cluster.local:80
+    description: In-cluster production server
 paths:
   # ---------------------------------------------------------------------------
   # Instance Management Endpoints
   # ---------------------------------------------------------------------------
-  /eflint/status:
+  /api/v1/eflint/status:
     get:
       summary: Get instance status
       description: |
@@ -86,7 +85,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/start:
+  /api/v1/eflint/start:
     post:
       summary: Start instance
       description: |
@@ -140,7 +139,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/stop:
+  /api/v1/eflint/stop:
     post:
       summary: Stop instance
       description: |
@@ -186,7 +185,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/command:
+  /api/v1/eflint/command:
     post:
       summary: Send command
       description: |
@@ -621,32 +620,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommandResponse'
-        '400':
-          description: Bad request - invalid body, missing command, or missing instance_id
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Instance not found in pool
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Instance pool not configured or instance not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/restart:
+  /api/v1/eflint/restart:
     post:
       summary: Restart instance
       description: |
@@ -695,7 +670,7 @@ paths:
   # ---------------------------------------------------------------------------
   # Pool Management Endpoints
   # ---------------------------------------------------------------------------
-  /eflint/instances:
+  /api/v1/eflint/instances:
     get:
       summary: List all pool instances
       description: |
@@ -718,7 +693,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/instances/pool-size:
+  /api/v1/eflint/instances/pool-size:
     get:
       summary: Get pool size
       description: Returns the current target pool size and actual instance counts.
@@ -778,7 +753,7 @@ paths:
   # ---------------------------------------------------------------------------
   # State Management Endpoints (POC)
   # ---------------------------------------------------------------------------
-  /eflint/state:
+  /api/v1/eflint/state:
     get:
       summary: Get current state
       description: |
@@ -809,7 +784,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/export:
+  /api/v1/eflint/state/export:
     post:
       summary: Export state
       description: |
@@ -838,7 +813,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/import:
+  /api/v1/eflint/state/import:
     post:
       summary: Import state
       description: |
@@ -881,7 +856,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/checkpoint:
+  /api/v1/eflint/state/checkpoint:
     post:
       summary: Create checkpoint
       description: Creates a named checkpoint of the current state that can be restored later
@@ -922,7 +897,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/checkpoint/restore:
+  /api/v1/eflint/state/checkpoint/restore:
     post:
       summary: Restore checkpoint
       description: |
@@ -967,7 +942,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/checkpoints:
+  /api/v1/eflint/state/checkpoints:
     get:
       summary: List checkpoints
       description: Lists all available checkpoints
@@ -988,7 +963,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /eflint/state/checkpoint/{name}:
+  /api/v1/eflint/state/checkpoint/{name}:
     delete:
       summary: Delete checkpoint
       description: Deletes a checkpoint by name
@@ -1020,7 +995,7 @@ paths:
   # ---------------------------------------------------------------------------
   # Health Endpoints
   # ---------------------------------------------------------------------------
-  /health:
+  /api/v1/health:
     get:
       summary: Health check
       description: Returns the health status of the service
@@ -1042,7 +1017,7 @@ paths:
   # ---------------------------------------------------------------------------
   # Policy Enforcer Endpoints (Reasoner-Agnostic)
   # ---------------------------------------------------------------------------
-  /policy-enforcer/allowed-clauses:
+  /api/v1/policy-enforcer/allowed-clauses:
     get:
       summary: Get all allowed clauses
       description: |
@@ -1081,7 +1056,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /policy-enforcer/validate:
+  /api/v1/policy-enforcer/validate:
     post:
       summary: Validate request
       description: |
