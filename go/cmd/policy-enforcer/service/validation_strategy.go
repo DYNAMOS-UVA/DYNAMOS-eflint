@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 )
 
@@ -10,6 +12,9 @@ import (
 type ValidationStrategy interface {
 	// Validate validates a user's access to a data provider.
 	Validate(steward, userName string) *ValidationResult
+
+	// ValidateAndPersist validates a new policy payload and persists it if valid.
+	ValidateAndPersist(ctx context.Context, steward string, payload []byte) error
 
 	// Name returns the strategy name for logging/debugging.
 	Name() string

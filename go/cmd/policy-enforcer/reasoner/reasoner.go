@@ -75,6 +75,9 @@ type Reasoner interface {
 	// IsRunning returns whether the reasoner is ready to process requests.
 	IsRunning() bool
 
+	// ValidateAndPersistModel validates and persists a new reasoning model.
+	ValidateAndPersistModel(ctx context.Context, organization string, modelText string) error
+
 	// Name returns the name/type of this reasoner (e.g., "eflint", "symboleo", "json").
 	Name() string
 }

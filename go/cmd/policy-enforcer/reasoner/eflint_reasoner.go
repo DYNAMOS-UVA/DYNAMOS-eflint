@@ -44,6 +44,27 @@ func (r *EflintReasoner) IsRunning() bool {
 	return r.pool.GetTargetSize() > 0
 }
 
+// ValidateAndPersistModel validates a raw eFLINT model by sending and persisting it.
+func (r *EflintReasoner) ValidateAndPersistModel(ctx context.Context, organization string, modelText string) error {
+	entry, err := r.pool.Acquire()
+	if err != nil {
+		return fmt.Errorf("failed to acquire eFLINT instance: %w", err)
+	}
+	defer r.pool.Release(entry)
+
+	if _, err := entry.Manager.SendPhrases(modelText); err != nil {
+		r.logger.Error("invalid eFLINT specification", zap.Error(err))
+		return fmt.Errorf("invalid eFLINT specification: %w", err)
+	}
+
+	if err := r.modelRepo.SaveEflintModel(organization, modelText); err != nil {
+		r.logger.Error("failed to save eFLINT model", zap.Error(err))
+		return fmt.Errorf("failed to save eFLINT model: %w", err)
+	}
+
+	return nil
+}
+
 // -----------------------------------------------------------------------------
 // Pool Lifecycle Helper
 // -----------------------------------------------------------------------------

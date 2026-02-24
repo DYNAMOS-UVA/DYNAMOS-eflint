@@ -197,3 +197,14 @@ func (s *ValidationService) addValidProvider(
 		ComputeProviders: result.MatchedComputeProvs,
 	}
 }
+
+// ValidateAndPersistAgreement resolves the strategy and delegates validation and persistence.
+func (s *ValidationService) ValidateAndPersistAgreement(ctx context.Context, provider string, payload []byte) error {
+	strategy := s.resolveStrategy(provider)
+	s.logger.Info("Validating and persisting agreement",
+		zap.String("provider", provider),
+		zap.String("strategy", strategy.Name()),
+	)
+
+	return strategy.ValidateAndPersist(ctx, provider, payload)
+}

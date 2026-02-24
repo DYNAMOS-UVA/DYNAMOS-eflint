@@ -10,6 +10,9 @@ type AgreementRepository interface {
 	// GetAgreement retrieves an agreement for a specific data steward.
 	// Returns the agreement and a boolean indicating if the agreement was found.
 	GetAgreement(steward string) (*api.Agreement, bool, error)
+
+	// SaveAgreement saves an agreement for a specific data steward.
+	SaveAgreement(steward string, agreement *api.Agreement) error
 }
 
 // UserRelation represents the relationship between a user and a data provider.

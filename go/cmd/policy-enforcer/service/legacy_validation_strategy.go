@@ -1,6 +1,10 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
@@ -28,6 +32,27 @@ func NewLegacyValidationStrategy(
 // Name returns the strategy name.
 func (s *LegacyValidationStrategy) Name() string {
 	return "legacy"
+}
+
+// ValidateAndPersist validates a JSON legacy agreement and saves it.
+func (s *LegacyValidationStrategy) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
+	var agreement Agreement
+	if err := json.Unmarshal(payload, &agreement); err != nil {
+		s.logger.Error("Failed to unmarshal legacy agreement", zap.Error(err))
+		return fmt.Errorf("invalid legacy agreement JSON: %w", err)
+	}
+
+	if agreement.Name != steward {
+		s.logger.Error("Agreement name mismatch", zap.String("expected", steward), zap.String("actual", agreement.Name))
+		return fmt.Errorf("agreement name mismatch: expected %s, got %s", steward, agreement.Name)
+	}
+
+	if err := s.agreementRepo.SaveAgreement(steward, &agreement); err != nil {
+		s.logger.Error("Failed to save agreement", zap.Error(err))
+		return fmt.Errorf("failed to save agreement: %w", err)
+	}
+
+	return nil
 }
 
 // Validate validates a user's access using the legacy JSON agreement approach.

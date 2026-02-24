@@ -1,8 +1,10 @@
 package repository
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/etcd"
@@ -41,4 +43,17 @@ func (r *EtcdAgreementRepository) GetAgreement(steward string) (*api.Agreement, 
 	}
 
 	return &agreement, true, nil
+}
+
+// SaveAgreement saves an agreement for a specific data steward to etcd.
+func (r *EtcdAgreementRepository) SaveAgreement(steward string, agreement *api.Agreement) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := agreementKeyPrefix + steward
+	jsonBytes, err := json.Marshal(agreement)
+	if err != nil {
+		return fmt.Errorf("failed to marshal agreement: %w", err)
+	}
+	_, err = r.client.Put(ctx, key, string(jsonBytes))
+	return err
 }

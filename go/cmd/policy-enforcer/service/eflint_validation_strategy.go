@@ -31,6 +31,11 @@ func (s *EflintValidationStrategy) Name() string {
 	return "eflint"
 }
 
+// ValidateAndPersist validates and saves an eFLINT agreement model.
+func (s *EflintValidationStrategy) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
+	return s.reasoner.ValidateAndPersistModel(ctx, steward, string(payload))
+}
+
 // Validate validates a user's access using the eFLINT policy reasoner.
 // The reasoner handles the full lifecycle: acquiring a pool instance, loading
 // the organization's model, querying facts, and releasing the instance.
