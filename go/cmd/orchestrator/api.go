@@ -71,60 +71,64 @@ func agreementsHandler(etcdClient *clientv3.Client, etcdRoot string) http.Handle
 			// Call your handler for GET
 			api.GenericGetHandler[api.Agreement](w, r, etcdClient, etcdRoot)
 		case http.MethodPut:
-			body, err := io.ReadAll(r.Body)
-			r.Body.Close()
-			if err != nil {
-				logger.Sugar().Errorf("Error reading body: %v", err)
-				http.Error(w, "Error reading request body", http.StatusBadRequest)
-				return
-			}
-
-			var nameExtractor struct {
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(body, &nameExtractor); err != nil || nameExtractor.Name == "" {
-				logger.Sugar().Errorf("Payload must be JSON and contain a 'name' field")
-				http.Error(w, "Payload must be JSON and contain a 'name' field", http.StatusBadRequest)
-				return
-			}
-
-			correlationId := uuid.New().String()
-			policyUpdate := &pb.PolicyUpdate{
-				Type: "agreementUpdate",
-				RequestMetadata: &pb.RequestMetadata{
-					DestinationQueue: "policyEnforcer-in",
-					CorrelationId:    correlationId,
-				},
-				AgreementName:    nameExtractor.Name,
-				AgreementPayload: body,
-			}
-
-			resChan := make(chan *pb.PolicyUpdate, 1)
-			agreementUpdateMutex.Lock()
-			agreementUpdateMap[correlationId] = resChan
-			agreementUpdateMutex.Unlock()
-
-			c.SendPolicyUpdate(r.Context(), policyUpdate)
-
-			select {
-			case res := <-resChan:
-				if res.ValidationResponse != nil && !res.ValidationResponse.RequestApproved {
-					http.Error(w, "Policy update rejected by Policy Enforcer", http.StatusBadRequest)
-					return
-				}
-				go checkJobs(nameExtractor.Name)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte("OK"))
-			case <-time.After(30 * time.Second):
-				agreementUpdateMutex.Lock()
-				delete(agreementUpdateMap, correlationId)
-				agreementUpdateMutex.Unlock()
-				http.Error(w, "Timeout waiting for Policy Enforcer validation", http.StatusGatewayTimeout)
-			}
+			handlePutAgreement(w, r)
 		default:
 			// Respond with a 405 'Method Not Allowed' HTTP response if the method isn't supported
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+func handlePutAgreement(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		logger.Sugar().Errorf("Error reading body: %v", err)
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	var nameExtractor struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &nameExtractor); err != nil || nameExtractor.Name == "" {
+		logger.Sugar().Errorf("Payload must be JSON and contain a 'name' field")
+		http.Error(w, "Payload must be JSON and contain a 'name' field", http.StatusBadRequest)
+		return
+	}
+
+	correlationId := uuid.New().String()
+	policyUpdate := &pb.PolicyUpdate{
+		Type: "agreementUpdate",
+		RequestMetadata: &pb.RequestMetadata{
+			DestinationQueue: "policyEnforcer-in",
+			CorrelationId:    correlationId,
+		},
+		AgreementName:    nameExtractor.Name,
+		AgreementPayload: body,
+	}
+
+	resChan := make(chan *pb.PolicyUpdate, 1)
+	agreementUpdateMutex.Lock()
+	agreementUpdateMap[correlationId] = resChan
+	agreementUpdateMutex.Unlock()
+
+	c.SendPolicyUpdate(r.Context(), policyUpdate)
+
+	select {
+	case res := <-resChan:
+		if res.ValidationResponse != nil && !res.ValidationResponse.RequestApproved {
+			http.Error(w, "Policy update rejected by Policy Enforcer", http.StatusBadRequest)
+			return
+		}
+		go checkJobs(nameExtractor.Name)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	case <-time.After(30 * time.Second):
+		agreementUpdateMutex.Lock()
+		delete(agreementUpdateMap, correlationId)
+		agreementUpdateMutex.Unlock()
+		http.Error(w, "Timeout waiting for Policy Enforcer validation", http.StatusGatewayTimeout)
 	}
 }
 
