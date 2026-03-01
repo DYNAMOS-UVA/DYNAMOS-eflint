@@ -121,18 +121,33 @@ func NewInstancePool(config *PoolConfig, stateDir string, logger *zap.Logger) (*
 	}
 	atomic.StoreInt32(&pool.targetSize, int32(config.TargetSize))
 
-	// Start the initial instances
-	for i := 0; i < config.TargetSize; i++ {
-		entry, err := pool.createInstance()
-		if err != nil {
-			logger.Error("failed to create pool instance during initialization",
-				zap.Int("index", i),
-				zap.Error(err),
-			)
-			// Continue starting remaining instances
-			continue
-		}
+	// Start the initial instances in parallel
+	var wg sync.WaitGroup
+	results := make(chan *PoolEntry, config.TargetSize)
 
+	for i := 0; i < config.TargetSize; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+
+			entry, err := pool.createInstance()
+			if err != nil {
+				logger.Error("failed to create pool instance during initialization",
+					zap.Int("index", index),
+					zap.Error(err),
+				)
+				// Continue starting remaining instances
+				return
+			}
+
+			results <- entry
+		}(i)
+	}
+
+	wg.Wait()
+	close(results)
+
+	for entry := range results {
 		pool.registryMu.Lock()
 		pool.registry = append(pool.registry, entry)
 		pool.registryMu.Unlock()
@@ -202,18 +217,19 @@ func (p *InstancePool) Acquire() (*PoolEntry, error) {
 	}
 }
 
-// Release reverts an instance to empty state and returns it to the pool.
-// It verifies the state is actually empty by checking target_contents.
-// If verification fails, the instance is marked unhealthy.
-// This method is designed to be called asynchronously via a goroutine.
+// Release restarts an instance with the empty model and returns it to the pool.
+// If the restart fails, the instance is marked unhealthy and will be replaced
+// by the health monitor. This method is designed to be called asynchronously
+// via a goroutine.
 func (p *InstancePool) Release(entry *PoolEntry) {
 	if entry == nil {
 		return
 	}
 
-	// Revert to empty state
-	if err := entry.StateManager.Revert(); err != nil {
-		p.logger.Error("failed to revert instance, marking as unhealthy",
+	// Restart the underlying eFLINT server process with the empty model to
+	// provide process-level isolation between uses.
+	if err := entry.Manager.Start(p.config.EmptyModelPath); err != nil {
+		p.logger.Error("failed to restart instance, marking as unhealthy",
 			zap.String("id", entry.ID),
 			zap.Error(err),
 		)
@@ -221,26 +237,7 @@ func (p *InstancePool) Release(entry *PoolEntry) {
 		return
 	}
 
-	// Verify the state is actually empty
-	isEmpty, err := entry.StateManager.VerifyEmptyState()
-	if err != nil {
-		p.logger.Error("failed to verify empty state, marking as unhealthy",
-			zap.String("id", entry.ID),
-			zap.Error(err),
-		)
-		entry.SetState(InstanceStateUnhealthy)
-		return
-	}
-
-	if !isEmpty {
-		p.logger.Warn("instance state is not empty after revert, marking as unhealthy",
-			zap.String("id", entry.ID),
-		)
-		entry.SetState(InstanceStateUnhealthy)
-		return
-	}
-
-	// Instance is clean, return to pool
+	// Instance has a fresh process, return to pool as idle
 	entry.SetState(InstanceStateIdle)
 
 	// Non-blocking send to available channel; if full, the health monitor will pick it up
@@ -432,24 +429,43 @@ func (p *InstancePool) runHealthCheck() {
 	}
 
 	// 3. Enforce target size - spin up new instances if needed
-	for healthyCount < target {
-		entry, err := p.createInstance()
-		if err != nil {
-			p.logger.Error("failed to create new instance for target enforcement",
-				zap.Error(err),
-			)
-			break
+	if healthyCount < target {
+		needed := target - healthyCount
+
+		var wg sync.WaitGroup
+		results := make(chan *PoolEntry, needed)
+
+		for i := 0; i < needed; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				entry, err := p.createInstance()
+				if err != nil {
+					p.logger.Error("failed to create new instance for target enforcement",
+						zap.Error(err),
+					)
+					return
+				}
+
+				results <- entry
+			}()
 		}
 
-		p.registry = append(p.registry, entry)
-		healthyCount++
+		wg.Wait()
+		close(results)
 
-		select {
-		case p.available <- entry:
-		default:
-			p.logger.Warn("available channel full after creating new instance",
-				zap.String("id", entry.ID),
-			)
+		for entry := range results {
+			p.registry = append(p.registry, entry)
+			healthyCount++
+
+			select {
+			case p.available <- entry:
+			default:
+				p.logger.Warn("available channel full after creating new instance",
+					zap.String("id", entry.ID),
+				)
+			}
 		}
 	}
 

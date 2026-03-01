@@ -63,6 +63,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	config   *ManagerConfig
 	logger   *zap.Logger
+	rnd      *rand.Rand
 }
 
 // NewManager creates a new eFLINT instance Manager with the given configuration.
@@ -74,6 +75,7 @@ func NewManager(config *ManagerConfig, logger *zap.Logger) *Manager {
 	return &Manager{
 		config: config,
 		logger: logger,
+		rnd:    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -395,5 +397,9 @@ func (m *Manager) startProcess(modelLocation string, port int) (*exec.Cmd, error
 
 // generateRandomPort generates a random port number within the configured range.
 func (m *Manager) generateRandomPort() int {
-	return rand.Intn(m.config.MaxPort-m.config.MinPort) + m.config.MinPort
+	if m.rnd == nil {
+		m.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+
+	return m.rnd.Intn(m.config.MaxPort-m.config.MinPort) + m.config.MinPort
 }
