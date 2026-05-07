@@ -1,0 +1,43 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Alice requests UVA — approved
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Alice has a relation at UVA (DataThroughTtp only); no relation at VU.
+// This scenario covers a single-steward approved request.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint          \
+//                        02_agreement_rules.eflint           \
+//                        agreement_UVA.eflint                \
+//                        scenario_02a_approved_alice_uva.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Alice", dataProviders: ["UVA"] }
+
++requester(Alice).
++requested-steward(UVA).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+?Holds(permitted-request(Alice)).
+// Expected: true
+
+?Holds(permitted-at-steward(Alice, UVA)).
+// Expected: true
+
+?-archetype When valid-archetype(Alice, UVA, archetype).
+// Expected: DataThroughTtp
+
+submit-data-request(Alice, UVA).
+
+?Holds(data-request(Alice, UVA)).
+// Expected: true

@@ -2,24 +2,32 @@ package service
 
 import (
 	"context"
-	"sync"
+	"fmt"
 
+	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/reasoner"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	"go.uber.org/zap"
 )
 
-// ValidationService orchestrates the validation of request approvals.
-// It uses the Strategy pattern to delegate validation to the appropriate
-// strategy based on provider configuration.
+// ValidationService orchestrates request-approval validation under the
+// layered eFLINT design.
+//
+// A single evaluation now runs over all requested stewards on one eFLINT
+// pool instance: per-steward Layer-2 phrases are gathered through
+// AgreementPhraseProviders (eFLINT-format vs legacy-JSON), the Layer-2 shared
+// rules come from EflintRulesRepository, and the reasoner builds Layer 3
+// from the requester / requested-steward inputs. The resulting per-steward
+// decisions are mapped back to the existing pb.ValidationResponse wire format
+// so the orchestrator side does not need to change.
 type ValidationService struct {
-	// Strategy resolution
 	providerConfigRepo repository.ProviderConfigRepository
-	legacyStrategy     ValidationStrategy
-	eflintStrategy     ValidationStrategy
+	rulesRepo          repository.EflintRulesRepository
+	legacyProvider     AgreementPhraseProvider
+	eflintProvider     AgreementPhraseProvider // optional: nil if eFLINT-format provider not configured
 
-	// Common dependencies
+	reasoner      reasoner.Reasoner
 	authGenerator AuthTokenGenerator
 	logger        *zap.Logger
 }
@@ -27,8 +35,10 @@ type ValidationService struct {
 // ValidationServiceConfig holds the configuration for creating a ValidationService.
 type ValidationServiceConfig struct {
 	ProviderConfigRepo repository.ProviderConfigRepository
-	LegacyStrategy     ValidationStrategy
-	EflintStrategy     ValidationStrategy // Optional: nil if eFLINT not configured
+	RulesRepo          repository.EflintRulesRepository
+	LegacyProvider     AgreementPhraseProvider
+	EflintProvider     AgreementPhraseProvider // optional
+	Reasoner           reasoner.Reasoner
 	AuthGenerator      AuthTokenGenerator
 	Logger             *zap.Logger
 }
@@ -37,8 +47,10 @@ type ValidationServiceConfig struct {
 func NewValidationServiceWithConfig(cfg ValidationServiceConfig) *ValidationService {
 	return &ValidationService{
 		providerConfigRepo: cfg.ProviderConfigRepo,
-		legacyStrategy:     cfg.LegacyStrategy,
-		eflintStrategy:     cfg.EflintStrategy,
+		rulesRepo:          cfg.RulesRepo,
+		legacyProvider:     cfg.LegacyProvider,
+		eflintProvider:     cfg.EflintProvider,
+		reasoner:           cfg.Reasoner,
 		authGenerator:      cfg.AuthGenerator,
 		logger:             cfg.Logger,
 	}
@@ -51,19 +63,46 @@ func (s *ValidationService) ValidateRequest(ctx context.Context, request *pb.Req
 		zap.Strings("dataProviders", request.DataProviders),
 	)
 
-	// Build the initial response
 	response := s.buildInitialResponse(request)
 
-	// Validate agreements for all requested data providers
-	validationResults := s.validateDataProviders(request.DataProviders, request.User.UserName)
+	// Phase 1: collect Layer-2 phrases per steward (no eFLINT calls yet).
+	stewardPhrases, missingStewards := s.collectStewardPhrases(request.DataProviders)
+	for _, missing := range missingStewards {
+		response.InvalidDataproviders = append(response.InvalidDataproviders, missing)
+		s.logger.Debug("steward has no agreement; marking invalid",
+			zap.String("steward", missing),
+		)
+	}
 
-	// Process validation results and update response
-	s.processValidationResults(validationResults, request.User.UserName, response)
+	// Phase 2: gather Layer-2 shared rules.
+	sharedRules, err := s.loadSharedRules()
+	if err != nil {
+		s.logger.Error("failed to load Layer-2 shared rules; aborting evaluation",
+			zap.Error(err),
+		)
+		s.markAllInvalid(request.DataProviders, response, "shared rules unavailable")
+		return response
+	}
 
-	// Determine if request is approved
+	// Phase 3: run a single layered evaluation across all requested stewards.
+	if len(stewardPhrases) > 0 {
+		eval, err := s.reasoner.EvaluateRequestApproval(ctx, reasoner.RequestApprovalParams{
+			Requester:      request.User.UserName,
+			Stewards:       request.DataProviders,
+			SharedRules:    sharedRules,
+			StewardPhrases: stewardPhrases,
+		})
+		if err != nil {
+			s.logger.Error("eFLINT layered evaluation failed",
+				zap.Error(err),
+			)
+			s.markAllInvalid(request.DataProviders, response, "reasoner error")
+			return response
+		}
+		s.applyEvaluation(eval, request, response)
+	}
+
 	response.RequestApproved = len(response.ValidDataproviders) > 0
-
-	// Generate auth token if approved
 	if response.RequestApproved {
 		response.Auth = s.authGenerator.GenerateToken()
 	}
@@ -94,7 +133,6 @@ func (s *ValidationService) buildInitialResponse(request *pb.RequestApproval) *p
 		InvalidDataproviders: []string{},
 	}
 
-	// Copy options from request if present
 	if len(request.Options) > 0 {
 		response.Options = request.Options
 	}
@@ -102,109 +140,208 @@ func (s *ValidationService) buildInitialResponse(request *pb.RequestApproval) *p
 	return response
 }
 
-// validateDataProviders validates agreements for all requested data providers concurrently.
-// Each provider validation acquires its own pool instance, enabling parallel validation.
-func (s *ValidationService) validateDataProviders(dataProviders []string, userName string) []*ValidationResult {
-	results := make([]*ValidationResult, len(dataProviders))
+// collectStewardPhrases iterates over the requested data providers, resolves
+// the steward's AgreementPhraseProvider from its ProviderValidationConfig,
+// and returns the Layer-2 phrase block per steward. Stewards without an
+// agreement (or with a retrieval error) are returned in the second slice so
+// the caller can mark them invalid.
+func (s *ValidationService) collectStewardPhrases(dataProviders []string) (map[string]string, []string) {
+	phrases := make(map[string]string, len(dataProviders))
+	var missing []string
 
-	var wg sync.WaitGroup
-	for i, steward := range dataProviders {
-		wg.Add(1)
-		go func(idx int, st string) {
-			defer wg.Done()
-			results[idx] = s.validateSingleProvider(st, userName)
-		}(i, steward)
+	for _, steward := range dataProviders {
+		provider := s.resolveProvider(steward)
+		text, found, err := provider.GetLayer2Phrases(steward)
+		if err != nil {
+			s.logger.Warn("failed to load Layer-2 phrases for steward; treating as missing",
+				zap.String("steward", steward),
+				zap.String("provider", provider.Name()),
+				zap.Error(err),
+			)
+			missing = append(missing, steward)
+			continue
+		}
+		if !found {
+			missing = append(missing, steward)
+			continue
+		}
+		phrases[steward] = text
 	}
-	wg.Wait()
 
-	return results
+	return phrases, missing
 }
 
-// validateSingleProvider validates a single data provider using the appropriate strategy.
-func (s *ValidationService) validateSingleProvider(steward, userName string) *ValidationResult {
-	strategy := s.resolveStrategy(steward)
-
-	s.logger.Debug("Using validation strategy",
-		zap.String("steward", steward),
-		zap.String("strategy", strategy.Name()),
-	)
-
-	return strategy.Validate(steward, userName)
+// loadSharedRules reads the Layer-2 shared rules from etcd. An empty result is
+// allowed (the layered evaluation can still run against the per-steward
+// phrases) but is logged as a warning since the system is not configured as
+// expected.
+func (s *ValidationService) loadSharedRules() (string, error) {
+	if s.rulesRepo == nil {
+		return "", nil
+	}
+	text, found, err := s.rulesRepo.GetSharedAgreementRules()
+	if err != nil {
+		return "", fmt.Errorf("retrieving shared rules: %w", err)
+	}
+	if !found {
+		s.logger.Warn("Layer-2 shared rules are missing in etcd; query facts may not be derivable")
+	}
+	return text, nil
 }
 
-// resolveStrategy determines which validation strategy to use for a provider.
-func (s *ValidationService) resolveStrategy(steward string) ValidationStrategy {
-	// Default to legacy if no provider config repo
+// resolveProvider determines which AgreementPhraseProvider to use for a
+// steward. The provider config in etcd selects between eFLINT-format phrases
+// and legacy JSON; in either case the result feeds the same canonical
+// layered execution path.
+func (s *ValidationService) resolveProvider(steward string) AgreementPhraseProvider {
 	if s.providerConfigRepo == nil {
-		return s.legacyStrategy
+		return s.legacyProvider
 	}
 
 	config, found, err := s.providerConfigRepo.GetProviderConfig(steward)
 	if err != nil {
-		s.logger.Warn("Failed to retrieve provider config, defaulting to legacy validation",
+		s.logger.Warn("failed to retrieve provider config; defaulting to legacy",
 			zap.String("steward", steward),
 			zap.Error(err),
 		)
-		return s.legacyStrategy
+		return s.legacyProvider
 	}
-
 	if !found {
-		return s.legacyStrategy
+		return s.legacyProvider
 	}
 
-	// Use eFLINT strategy if configured and available
-	if config.ValidationStrategy == api.ValidationStrategyEflint && s.eflintStrategy != nil {
-		return s.eflintStrategy
+	if config.ValidationStrategy == api.ValidationStrategyEflint && s.eflintProvider != nil {
+		return s.eflintProvider
 	}
-
-	return s.legacyStrategy
+	return s.legacyProvider
 }
 
-// processValidationResults updates the response based on validation results.
-func (s *ValidationService) processValidationResults(
-	results []*ValidationResult,
-	userName string,
+// applyEvaluation maps the reasoner's per-steward decisions onto the
+// pb.ValidationResponse. Stewards with permitted-at-steward = true land in
+// ValidDataproviders together with their matched archetypes / compute
+// providers; everyone else is added to InvalidDataproviders.
+func (s *ValidationService) applyEvaluation(
+	eval *reasoner.RequestApprovalResult,
+	request *pb.RequestApproval,
 	response *pb.ValidationResponse,
 ) {
-	for _, result := range results {
-		if result.IsValid {
-			s.addValidProvider(result, userName, response)
-		} else {
-			response.InvalidDataproviders = append(response.InvalidDataproviders, result.Steward)
-			s.logger.Debug("Provider validation failed",
-				zap.String("steward", result.Steward),
-				zap.String("reason", result.InvalidReason),
+	if eval == nil {
+		return
+	}
+	response.ValidArchetypes.UserName = request.User.UserName
+	for _, steward := range request.DataProviders {
+		decision, ok := eval.PerSteward[steward]
+		if !ok {
+			continue
+		}
+		if !decision.Permitted {
+			if !containsString(response.InvalidDataproviders, steward) {
+				response.InvalidDataproviders = append(response.InvalidDataproviders, steward)
+			}
+			s.logger.Debug("steward marked invalid by reasoner",
+				zap.String("steward", steward),
+				zap.String("reason", decision.Reason),
 			)
+			continue
+		}
+		response.ValidArchetypes.Archetypes[steward] = &pb.UserAllowedArchetypes{
+			Archetypes: decision.Archetypes,
+		}
+		response.ValidDataproviders[steward] = &pb.DataProvider{
+			Archetypes:       decision.Archetypes,
+			ComputeProviders: decision.ComputeProviders,
 		}
 	}
 }
 
-// addValidProvider adds a validated provider to the response.
-func (s *ValidationService) addValidProvider(
-	result *ValidationResult,
-	userName string,
-	response *pb.ValidationResponse,
-) {
-	// Set valid archetypes for user
-	response.ValidArchetypes.UserName = userName
-	response.ValidArchetypes.Archetypes[result.Steward] = &pb.UserAllowedArchetypes{
-		Archetypes: result.MatchedArchetypes,
-	}
-
-	// Add to valid data providers
-	response.ValidDataproviders[result.Steward] = &pb.DataProvider{
-		Archetypes:       result.MatchedArchetypes,
-		ComputeProviders: result.MatchedComputeProvs,
+// markAllInvalid is invoked when an unrecoverable error short-circuits the
+// evaluation (no shared rules, reasoner error). Every requested steward is
+// marked invalid so the orchestrator does not see a partial success.
+func (s *ValidationService) markAllInvalid(dataProviders []string, response *pb.ValidationResponse, reason string) {
+	for _, steward := range dataProviders {
+		if containsString(response.InvalidDataproviders, steward) {
+			continue
+		}
+		response.InvalidDataproviders = append(response.InvalidDataproviders, steward)
+		s.logger.Debug("steward marked invalid",
+			zap.String("steward", steward),
+			zap.String("reason", reason),
+		)
 	}
 }
 
-// ValidateAndPersistAgreement resolves the strategy and delegates validation and persistence.
-func (s *ValidationService) ValidateAndPersistAgreement(ctx context.Context, provider string, payload []byte) error {
-	strategy := s.resolveStrategy(provider)
+// ValidateAndPersistAgreement resolves the steward's provider and delegates
+// validation + persistence to it.
+func (s *ValidationService) ValidateAndPersistAgreement(ctx context.Context, steward string, payload []byte) error {
+	provider := s.resolveProvider(steward)
 	s.logger.Info("Validating and persisting agreement",
-		zap.String("provider", provider),
-		zap.String("strategy", strategy.Name()),
+		zap.String("steward", steward),
+		zap.String("provider", provider.Name()),
 	)
+	return provider.ValidateAndPersist(ctx, steward, payload)
+}
 
-	return strategy.ValidateAndPersist(ctx, provider, payload)
+// GetAllowedClausesForSteward loads the steward's Layer-2 phrases (via the
+// configured provider) plus the Layer-2 shared rules, asks the reasoner to
+// introspect the steward-supports-* / relation-allows-* facts, and returns
+// the resulting StewardClauses snapshot. If `requester` is non-empty the
+// returned clauses are narrowed to that requester's relation only. Returns
+// (nil, nil) when the steward has no agreement registered.
+//
+// This is read-only: no Layer 3 is pushed and no Acts are fired, so the
+// endpoint is safe to expose to a policy engineer.
+func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, steward, requester string) (*reasoner.StewardClauses, error) {
+	if steward == "" {
+		return nil, fmt.Errorf("steward is required")
+	}
+
+	provider := s.resolveProvider(steward)
+	phrases, found, err := provider.GetLayer2Phrases(steward)
+	if err != nil {
+		s.logger.Warn("failed to load Layer-2 phrases for steward",
+			zap.String("steward", steward),
+			zap.String("provider", provider.Name()),
+			zap.Error(err),
+		)
+		return nil, fmt.Errorf("loading Layer-2 phrases for %s: %w", steward, err)
+	}
+	if !found {
+		return nil, nil
+	}
+
+	sharedRules, err := s.loadSharedRules()
+	if err != nil {
+		return nil, err
+	}
+
+	clauses, err := s.reasoner.IntrospectStewardClauses(ctx, reasoner.IntrospectStewardClausesParams{
+		Steward:        steward,
+		SharedRules:    sharedRules,
+		StewardPhrases: phrases,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("introspecting steward clauses: %w", err)
+	}
+
+	if requester != "" && clauses != nil {
+		filtered := make([]reasoner.RequesterClauses, 0, 1)
+		for _, rel := range clauses.Relations {
+			if rel.Requester == requester {
+				filtered = append(filtered, rel)
+				break
+			}
+		}
+		clauses.Relations = filtered
+	}
+
+	return clauses, nil
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }

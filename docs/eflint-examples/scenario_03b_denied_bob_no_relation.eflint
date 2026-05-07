@@ -1,0 +1,41 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Bob requests VU + UVA — denied (no relation at either steward)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Both VU and UVA have agreements registered, but Bob is not listed
+// in the relations of either. The request is denied because
+// permitted-request requires at least one steward where has-relation holds.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                 \
+//                        02_agreement_rules.eflint                  \
+//                        agreement_VU.eflint                        \
+//                        agreement_UVA.eflint                       \
+//                        scenario_03b_denied_bob_no_relation.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Bob", dataProviders: ["VU", "UVA"] }
+
++requester(Bob).
++requested-steward(VU).
++requested-steward(UVA).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+?Holds(has-relation(Bob, VU)).
+// Expected: false
+
+?Holds(has-relation(Bob, UVA)).
+// Expected: false
+
+?Holds(permitted-request(Bob)).
+// Expected: false

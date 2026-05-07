@@ -2,39 +2,32 @@ package service
 
 import (
 	"context"
-
-	"github.com/Jorrit05/DYNAMOS/pkg/api"
 )
 
-// ValidationStrategy defines the interface for different validation approaches.
-// This follows the Strategy pattern, allowing new validation methods to be added
-// without modifying existing code (Open/Closed Principle).
-type ValidationStrategy interface {
-	// Validate validates a user's access to a data provider.
-	Validate(steward, userName string) *ValidationResult
-
-	// ValidateAndPersist validates a new policy payload and persists it if valid.
-	ValidateAndPersist(ctx context.Context, steward string, payload []byte) error
-
-	// Name returns the strategy name for logging/debugging.
+// AgreementPhraseProvider produces the Layer-2 per-steward eFLINT phrase block
+// for a single data steward. The layered evaluation flow consumes one provider
+// per steward (as resolved from the steward's ProviderValidationConfig in etcd):
+// the eFLINT-format provider returns the stored phrases verbatim, while the
+// legacy-JSON provider loads the JSON agreement and translates it on the fly.
+//
+// All providers feed the same canonical execution path
+// (Layer 1 + Layer 2 shared + per-steward Layer 2 + Layer 3) inside the
+// eFLINT reasoner; the only thing that differs between providers is how the
+// per-steward Layer-2 phrases are obtained.
+type AgreementPhraseProvider interface {
+	// Name returns the provider's name for logging / diagnostics
+	// (e.g. "legacy", "eflint").
 	Name() string
-}
 
-// ValidationResult represents the result of validating a user against a data provider's agreement.
-type ValidationResult struct {
-	Steward             string
-	IsValid             bool
-	InvalidReason       string
-	MatchedArchetypes   []string
-	MatchedComputeProvs []string
-	UserRelation        *api.Relation
-}
+	// GetLayer2Phrases returns the eFLINT phrase block describing the steward's
+	// Layer-2 facts (agreement, steward-supports-*, has-relation,
+	// relation-allows-*). The boolean indicates whether the steward has an
+	// agreement registered at all.
+	GetLayer2Phrases(steward string) (string, bool, error)
 
-// invalidResult creates an invalid ValidationResult with the given reason.
-func invalidResult(steward, reason string) *ValidationResult {
-	return &ValidationResult{
-		Steward:       steward,
-		IsValid:       false,
-		InvalidReason: reason,
-	}
+	// ValidateAndPersist accepts an incoming policy payload, validates it,
+	// and persists it through the provider's native repository. Used by the
+	// HTTP API for runtime policy updates; does not participate in the
+	// per-request validation flow.
+	ValidateAndPersist(ctx context.Context, steward string, payload []byte) error
 }

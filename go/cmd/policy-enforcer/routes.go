@@ -10,7 +10,9 @@ import (
 )
 
 // RegisterRoutes registers all HTTP routes on the provided apiMux.
-// It separates concerns by grouping routes into health, eflint, pool, and policy-enforcer categories.
+// The request-approval flow is RabbitMQ-driven (see consume.go); the HTTP
+// API exposes the policy-engineer testing endpoints plus health and the
+// eFLINT instance/pool/state management surface.
 func RegisterRoutes(
 	apiMux *http.ServeMux,
 	instanceAPIHandler *eflint.InstanceAPIHandler,
@@ -18,20 +20,25 @@ func RegisterRoutes(
 	policyEnforcerHandler *policyenforcerhttp.HTTPHandler,
 	pool *eflint.InstancePool,
 ) {
-	// Health check endpoint
 	apiMux.Handle("/health", http.HandlerFunc(healthHandler))
 
-	// eFLINT instance management endpoints
+	registerPolicyEnforcerRoutes(apiMux, policyEnforcerHandler)
+
 	registerEflintInstanceRoutes(apiMux, instanceAPIHandler)
 
-	// eFLINT pool management endpoints
 	registerEflintPoolRoutes(apiMux, instanceAPIHandler)
 
-	// eFLINT state management endpoints
 	registerEflintStateRoutes(apiMux, stateAPIHandler)
+}
 
-	// Policy enforcer endpoints
-	registerPolicyEnforcerRoutes(apiMux, policyEnforcerHandler)
+// registerPolicyEnforcerRoutes registers the policy-engineer testing endpoints.
+func registerPolicyEnforcerRoutes(mux *http.ServeMux, h *policyenforcerhttp.HTTPHandler) {
+	mux.Handle("/policy-enforcer/allowed-clauses", &ochttp.Handler{
+		Handler: httpapi.RequireGET(h.GetAllowedClauses),
+	})
+	mux.Handle("/policy-enforcer/validate", &ochttp.Handler{
+		Handler: httpapi.RequirePOST(h.ValidateRequest),
+	})
 }
 
 // registerEflintInstanceRoutes registers routes for eFLINT instance lifecycle management.
@@ -94,19 +101,6 @@ func registerEflintStateRoutes(mux *http.ServeMux, h *eflint.StateAPIHandler) {
 	})
 	mux.Handle("/eflint/state/checkpoint/", &ochttp.Handler{
 		Handler: httpapi.RequireDELETE(h.DeleteCheckpoint),
-	})
-}
-
-// registerPolicyEnforcerRoutes registers routes for the policy enforcer API.
-func registerPolicyEnforcerRoutes(mux *http.ServeMux, h *policyenforcerhttp.HTTPHandler) {
-	// Allowed clauses endpoint (GET) - returns all clause types in a single call
-	mux.Handle("/policy-enforcer/allowed-clauses", &ochttp.Handler{
-		Handler: httpapi.RequireGET(h.GetAllAllowedClauses),
-	})
-
-	// Validation endpoint (POST)
-	mux.Handle("/policy-enforcer/validate", &ochttp.Handler{
-		Handler: httpapi.RequirePOST(h.ValidateRequest),
 	})
 }
 

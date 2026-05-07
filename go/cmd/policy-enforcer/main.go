@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/eflint"
-	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/policyenforcer"
 	policyenforcerhttp "github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/policyenforcerhttp"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/reasoner"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
@@ -27,8 +26,15 @@ import (
 	"google.golang.org/grpc"
 )
 
-//go:embed eflint/empty.eflint
+// embeddedInterfacePolicy is the Layer-1 interface policy bundled with the
+// enforcer binary. It declares the stable fact-type and query-fact schema
+// (see go/cmd/policy-enforcer/eflint/01_interface_policy.eflint) and is used
+// as the boot model for every eFLINT pool instance.
+//
+//go:embed embedded-models/01_interface_policy.eflint
 var embeddedModelFS embed.FS
+
+const embeddedInterfacePolicyPath = "./01_interface_policy.eflint"
 
 // Application holds all the dependencies for the policy enforcer service.
 type Application struct {
@@ -71,20 +77,22 @@ func NewApplication() (*Application, error) {
 	return app, nil
 }
 
-// initializeValidationService creates and configures the ValidationService with all strategies.
+// initializeValidationService creates and configures the ValidationService
+// with the layered eFLINT design's per-format AgreementPhraseProviders and
+// the shared-rules repository.
 func (app *Application) initializeValidationService(
 	providerConfigRepo repository.ProviderConfigRepository,
-	eflintStrategy service.ValidationStrategy,
+	rulesRepo repository.EflintRulesRepository,
+	legacyProvider service.AgreementPhraseProvider,
+	eflintProvider service.AgreementPhraseProvider,
+	r reasoner.Reasoner,
 ) {
-	legacyStrategy := service.NewLegacyValidationStrategy(
-		repository.NewEtcdAgreementRepository(app.etcdClient),
-		app.logger,
-	)
-
 	app.validationService = service.NewValidationServiceWithConfig(service.ValidationServiceConfig{
 		ProviderConfigRepo: providerConfigRepo,
-		LegacyStrategy:     legacyStrategy,
-		EflintStrategy:     eflintStrategy,
+		RulesRepo:          rulesRepo,
+		LegacyProvider:     legacyProvider,
+		EflintProvider:     eflintProvider,
+		Reasoner:           r,
 		AuthGenerator:      service.NewStaticAuthTokenGenerator(),
 		Logger:             app.logger,
 	})
@@ -102,6 +110,7 @@ func (app *Application) Close() {
 
 // Run starts the application background tasks.
 func (app *Application) Run() {
+	app.logger.Debug("New build test")
 	app.logger.Debug("Starting message consumer")
 
 	go func() {
@@ -163,20 +172,20 @@ func main() {
 	// Initialize repositories
 	providerConfigRepo := repository.NewEtcdProviderConfigRepository(app.etcdClient)
 	eflintModelRepo := repository.NewEtcdEflintModelRepository(app.etcdClient)
+	rulesRepo := repository.NewEtcdEflintRulesRepository(app.etcdClient)
+	agreementRepo := repository.NewEtcdAgreementRepository(app.etcdClient)
 
 	// Create the eFLINT reasoner (implements the Reasoner interface, uses pool + model repo)
 	eflintReasoner := reasoner.NewEflintReasoner(pool, eflintModelRepo, app.logger)
 
-	// Create eFLINT validation strategy (delegates to the Reasoner)
-	eflintStrategy := service.NewEflintValidationStrategy(eflintReasoner, app.logger)
+	// AgreementPhraseProviders: one per agreement-storage format. Both feed
+	// the same canonical layered execution path through the reasoner.
+	legacyProvider := service.NewLegacyAgreementPhraseProvider(agreementRepo, app.logger)
+	eflintProvider := service.NewEflintAgreementPhraseProvider(eflintModelRepo, eflintReasoner, app.logger)
 
-	// Initialize ValidationService with both strategies
-	app.initializeValidationService(providerConfigRepo, eflintStrategy)
+	app.initializeValidationService(providerConfigRepo, rulesRepo, legacyProvider, eflintProvider, eflintReasoner)
 
-	app.logger.Info("ValidationService configured with legacy and eFLINT strategies (pool-based)")
-
-	// Create the policy enforcer (uses the Reasoner interface)
-	enforcer := policyenforcer.NewEnforcer(eflintReasoner, app.logger)
+	app.logger.Info("ValidationService configured with layered eFLINT evaluation (legacy + eflint providers)")
 
 	// Create a single Manager for the eFLINT debug/management HTTP API endpoints
 	defaultManager := eflint.NewManager(managerConfig, app.logger)
@@ -191,7 +200,7 @@ func main() {
 
 	instanceAPIHandler := eflint.NewInstanceAPIHandler(defaultManager, pool, app.logger)
 	stateAPIHandler := eflint.NewStateAPIHandler(defaultStateManager, pool, app.logger)
-	policyEnforcerHandler := policyenforcerhttp.NewHTTPHandler(enforcer, app.logger)
+	policyEnforcerHandler := policyenforcerhttp.NewHTTPHandler(app.validationService, app.logger)
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization"})
 	originsOk := handlers.AllowedOrigins([]string{"*"})
@@ -200,7 +209,6 @@ func main() {
 	mux := http.NewServeMux()
 	apiMux := http.NewServeMux()
 
-	// Register all routes
 	RegisterRoutes(apiMux, instanceAPIHandler, stateAPIHandler, policyEnforcerHandler, pool)
 
 	mux.Handle(apiVersion+"/", http.StripPrefix(apiVersion, apiMux))
@@ -254,13 +262,13 @@ func resolveModelPath(logger *zap.Logger, configuredPath string) string {
 		}
 	}
 
-	data, err := embeddedModelFS.ReadFile("eflint/empty.eflint")
+	data, err := embeddedModelFS.ReadFile(embeddedInterfacePolicyPath)
 	if err != nil {
 		logger.Warn("failed to read embedded model", zap.Error(err))
 		return configuredPath
 	}
 
-	tmpFile, err := os.CreateTemp("", "dynamos-agreement-*.eflint")
+	tmpFile, err := os.CreateTemp("", "dynamos-interface-policy-*.eflint")
 	if err != nil {
 		logger.Warn("failed to create temp file for embedded model", zap.Error(err))
 		return configuredPath

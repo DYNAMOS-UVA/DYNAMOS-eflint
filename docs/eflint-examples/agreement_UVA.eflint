@@ -1,0 +1,45 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// DYNAMOS Policy Enforcer — Agreement: UVA
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Corresponds to the etcd entry at /policyEnforcer/agreements/UVA.
+//
+// Requires: 01_interface_policy.eflint + 02_agreement_rules.eflint
+// ─────────────────────────────────────────────────────────────────────────────
+// Layer 2b — Per-steward agreement for UVA (agreement_UVA.eflint)
+
+// Type instances referenced by this agreement.
++data-steward(UVA).
++archetype(ComputeToData).
++archetype(DataThroughTtp).
++archetype(ReproducableScience).
++compute-provider(SURF).
++dataset(WageGap).
++request-type(SqlDataRequest).
++request-type(GenericRequest).
+
++agreement(UVA).
+
+// Archetypes supported at the agreement level.
++steward-supports-archetype(UVA, ComputeToData).
++steward-supports-archetype(UVA, DataThroughTtp).
++steward-supports-archetype(UVA, ReproducableScience).
+
+// Compute providers accepted by UVA.
++steward-supports-compute-provider(UVA, SURF).
+
+// ── Relation: Niels ──────────────────────────────────────────────────────
++has-relation(Niels, UVA).
++relation-allows-request-type(Niels, UVA, SqlDataRequest).
++relation-allows-request-type(Niels, UVA, GenericRequest).
++relation-allows-dataset(Niels, UVA, WageGap).
++relation-allows-archetype(Niels, UVA, ComputeToData).
++relation-allows-archetype(Niels, UVA, DataThroughTtp).
++relation-allows-compute-provider(Niels, UVA, SURF).
+
+// ── Relation: Alice ──────────────────────────────────────────────────────
++has-relation(Alice, UVA).
++relation-allows-request-type(Alice, UVA, SqlDataRequest).
++relation-allows-dataset(Alice, UVA, WageGap).
++relation-allows-archetype(Alice, UVA, DataThroughTtp).
++relation-allows-compute-provider(Alice, UVA, SURF).

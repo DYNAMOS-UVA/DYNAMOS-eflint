@@ -1,0 +1,59 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Continuity — Policy change (F3)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// UCON re-evaluation trigger: the agreement policy changes (VU withdraws
+// ComputeToData). An in-flight session that uses ComputeToData at VU must
+// be revoked.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                     \
+//                        02_agreement_rules.eflint                      \
+//                        agreement_VU.eflint                            \
+//                        scenario_05a_continuation_policy_change.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASELINE — Establish a session
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Niels", dataProviders: ["VU"] }
+
++requester(Niels).
++requested-steward(VU).
+
+?Holds(permitted-request(Niels)).
+// Expected: true
+
+submit-data-request(Niels, VU).
+
+?Holds(data-request(Niels, VU)).
+// Expected: true
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: true
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Policy change: VU withdraws ComputeToData
+// ═══════════════════════════════════════════════════════════════════════════
+
+-steward-supports-archetype(VU, ComputeToData).
+
+?Holds(valid-archetype(Niels, VU, ComputeToData)).
+// Expected: false
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: false — session revoked
+
+?-archetype When valid-archetype(Niels, VU, archetype).
+// Expected: (empty)
+
+// Restore.
++steward-supports-archetype(VU, ComputeToData).
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: true

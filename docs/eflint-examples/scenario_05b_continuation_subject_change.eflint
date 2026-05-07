@@ -1,0 +1,59 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Continuity — Subject attribute change (F4)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// UCON re-evaluation trigger: a subject attribute changes (Niels loses his
+// relation at VU). An in-flight ComputeToData session at VU must be revoked.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                      \
+//                        02_agreement_rules.eflint                       \
+//                        agreement_VU.eflint                             \
+//                        scenario_05b_continuation_subject_change.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASELINE — Establish a session
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Niels", dataProviders: ["VU"] }
+
++requester(Niels).
++requested-steward(VU).
+
+?Holds(permitted-request(Niels)).
+// Expected: true
+
+submit-data-request(Niels, VU).
+
+?Holds(data-request(Niels, VU)).
+// Expected: true
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: true
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Subject attribute change: Niels loses his relation at VU
+// ═══════════════════════════════════════════════════════════════════════════
+
+-has-relation(Niels, VU).
+
+?Holds(permitted-at-steward(Niels, VU)).
+// Expected: false
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: false — session revoked
+
+// Restore.
++has-relation(Niels, VU).
++relation-allows-request-type(Niels, VU, SqlDataRequest).
++relation-allows-dataset(Niels, VU, WageGap).
++relation-allows-archetype(Niels, VU, ComputeToData).
++relation-allows-compute-provider(Niels, VU, SURF).
+
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: true

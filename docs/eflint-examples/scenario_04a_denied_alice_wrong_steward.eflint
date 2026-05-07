@@ -1,0 +1,45 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Alice requests VU — denied (relation at UVA, not VU)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Alice has a relation at UVA but NOT at VU.
+// Requesting VU alone is denied; adding UVA makes it admissible.
+// This scenario demonstrates that the request must include a steward where
+// the requester actually has a relation.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                    \
+//                        02_agreement_rules.eflint                     \
+//                        agreement_VU.eflint                           \
+//                        agreement_UVA.eflint                          \
+//                        scenario_04a_denied_alice_wrong_steward.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Alice", dataProviders: ["VU"] }
+// Alice has a relation at UVA but NOT at VU.
+
++requester(Alice).
++requested-steward(VU).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+?Holds(has-relation(Alice, VU)).
+// Expected: false
+
+?Holds(permitted-request(Alice)).
+// Expected: false
+
+// Adding UVA to the request makes it admissible:
++requested-steward(UVA).
+
+?Holds(permitted-request(Alice)).
+// Expected: true

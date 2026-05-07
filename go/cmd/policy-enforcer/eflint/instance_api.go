@@ -31,15 +31,8 @@ func NewInstanceAPIHandler(manager *Manager, pool *InstancePool, logger *zap.Log
 	}
 }
 
-// resolveManager returns the manager for the given request.
-// If instance_id is provided (query param or body field), it looks up the pool entry.
-// Otherwise, it returns the default manager.
-func (h *InstanceAPIHandler) resolveManager(r *http.Request) (*Manager, error) {
-	instanceID := r.URL.Query().Get("instance_id")
-	if instanceID == "" {
-		return h.manager, nil
-	}
-
+// resolveManagerByID returns the manager for a specific pool instance ID.
+func (h *InstanceAPIHandler) resolveManagerByID(instanceID string) (*Manager, error) {
 	if h.pool == nil {
 		return h.manager, nil
 	}
@@ -49,6 +42,18 @@ func (h *InstanceAPIHandler) resolveManager(r *http.Request) (*Manager, error) {
 		return nil, err
 	}
 	return entry.Manager, nil
+}
+
+// resolveManager returns the manager for the given request.
+// If instance_id is provided (query param), it looks up the pool entry.
+// Otherwise, it returns the default manager.
+func (h *InstanceAPIHandler) resolveManager(r *http.Request) (*Manager, error) {
+	instanceID := r.URL.Query().Get("instance_id")
+	if instanceID == "" {
+		return h.manager, nil
+	}
+
+	return h.resolveManagerByID(instanceID)
 }
 
 // requireManager validates that instanceID is non-empty, resolves the corresponding
@@ -65,12 +70,12 @@ func (h *InstanceAPIHandler) requireManager(w http.ResponseWriter, instanceID st
 		return nil, false
 	}
 
-	entry, err := h.pool.GetByID(instanceID)
+	mgr, err := h.resolveManagerByID(instanceID)
 	if err != nil {
 		httpapi.WriteError(w, http.StatusNotFound, err.Error())
 		return nil, false
 	}
-	return entry.Manager, true
+	return mgr, true
 }
 
 // -----------------------------------------------------------------------------
@@ -87,8 +92,9 @@ type StatusResponse struct {
 
 // StartRequest represents the request body for starting an instance.
 type StartRequest struct {
-	ModelLocation string `json:"model_location"`  // Path to the eFLINT model file
-	Force         bool   `json:"force,omitempty"` // Force restart if already running
+	ModelLocation string `json:"model_location"`        // Path to the eFLINT model file
+	InstanceID    string `json:"instance_id,omitempty"` // Optional: target a specific pool instance
+	Force         bool   `json:"force,omitempty"`       // Deprecated: no longer required; start always replaces an existing process
 }
 
 // CommandRequest represents the request body for sending a command.
@@ -241,10 +247,10 @@ func (h *InstanceAPIHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, response)
 }
 
-// Start starts the eFLINT instance with the given model.
-// If an instance is already running and force=false, returns a conflict error.
-// If force=true, the existing instance is stopped and a new one is started.
-// POST /eflint/start (operates on the default manager, not pool instances)
+// Start starts or restarts an eFLINT instance with the given model.
+// If instance_id is provided, it targets that pool instance.
+// Otherwise, it uses the default manager.
+// POST /eflint/start
 func (h *InstanceAPIHandler) Start(w http.ResponseWriter, r *http.Request) {
 	var req StartRequest
 	if err := httpapi.DecodeJSON(r, &req); err != nil {
@@ -257,19 +263,22 @@ func (h *InstanceAPIHandler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if instance is already running
-	if h.manager.IsRunning() && !req.Force {
-		httpapi.WriteError(w, http.StatusConflict, "instance already running, use force=true to restart")
-		return
+	mgr := h.manager
+	if req.InstanceID != "" {
+		var ok bool
+		mgr, ok = h.requireManager(w, req.InstanceID)
+		if !ok {
+			return
+		}
 	}
 
-	if err := h.manager.Start(req.ModelLocation); err != nil {
+	if err := mgr.Start(req.ModelLocation); err != nil {
 		h.logger.Error("failed to start instance", zap.Error(err))
 		httpapi.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	status := h.manager.Status()
+	status := mgr.Status()
 	httpapi.WriteJSON(w, http.StatusOK, StatusResponse{
 		Running:       status.Running,
 		Port:          status.Port,

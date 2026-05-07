@@ -9,7 +9,7 @@ dynamos := $(dynamos_core) policy-enforcer
 # Docker Hub account for tagging and pushing images
 dockerhub_account := dynamos1
 # Platforms for multi-arch builds
-PLATFORMS ?= linux/amd64,linux/arm64
+PLATFORMS ?= linux/arm64
 # eFLINT source for policy-enforcer
 EFLINT_REPO ?= https://gitlab.com/eflint/haskell-implementation.git
 EFLINT_TAG ?= v4.1.0.1

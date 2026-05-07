@@ -66,6 +66,37 @@ type Manager struct {
 	rnd      *rand.Rand
 }
 
+// limitedBuffer stores the latest bytes written up to maxBytes.
+// It is safe for concurrent use by process stdout/stderr writers.
+type limitedBuffer struct {
+	mu       sync.Mutex
+	maxBytes int
+	buf      []byte
+}
+
+func newLimitedBuffer(maxBytes int) *limitedBuffer {
+	return &limitedBuffer{maxBytes: maxBytes}
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.maxBytes {
+		b.buf = append([]byte(nil), b.buf[len(b.buf)-b.maxBytes:]...)
+	}
+
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return string(b.buf)
+}
+
 // NewManager creates a new eFLINT instance Manager with the given configuration.
 func NewManager(config *ManagerConfig, logger *zap.Logger) *Manager {
 	if config == nil {
@@ -365,9 +396,11 @@ func (m *Manager) GetEflintStatus() (string, error) {
 func (m *Manager) startProcess(modelLocation string, port int) (*exec.Cmd, error) {
 	cmd := exec.Command(m.config.EflintServerPath, modelLocation, fmt.Sprintf("%d", port))
 
-	// Capture stderr for debugging
-	cmd.Stderr = nil
-	cmd.Stdout = nil
+	// Keep bounded startup logs to diagnose failing launches without unbounded memory growth.
+	stdoutBuf := newLimitedBuffer(16 * 1024)
+	stderrBuf := newLimitedBuffer(16 * 1024)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	m.logger.Info("starting eflint-server",
 		zap.String("path", m.config.EflintServerPath),
@@ -379,12 +412,34 @@ func (m *Manager) startProcess(modelLocation string, port int) (*exec.Cmd, error
 		return nil, fmt.Errorf("failed to start eflint-server: %w", err)
 	}
 
-	// Wait for the server to start
-	time.Sleep(m.config.StartupDelay)
+	// Wait asynchronously so we can detect immediate startup crashes.
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
 
-	// Check if the process is still running
-	if cmd.ProcessState != nil {
-		return nil, fmt.Errorf("eflint-server process exited immediately")
+	startupTimer := time.NewTimer(m.config.StartupDelay)
+	defer startupTimer.Stop()
+
+	select {
+	case waitErr := <-exitCh:
+		stdout := strings.TrimSpace(stdoutBuf.String())
+		stderr := strings.TrimSpace(stderrBuf.String())
+		fields := []zap.Field{
+			zap.String("model", modelLocation),
+			zap.Int("port", port),
+			zap.Error(waitErr),
+		}
+		if stdout != "" {
+			fields = append(fields, zap.String("stdout", stdout))
+		}
+		if stderr != "" {
+			fields = append(fields, zap.String("stderr", stderr))
+		}
+		m.logger.Error("eflint-server exited during startup", fields...)
+		return nil, fmt.Errorf("eflint-server process exited during startup: %w", waitErr)
+	case <-startupTimer.C:
+		// Process survived the startup window.
 	}
 
 	m.logger.Info("eflint-server started successfully",

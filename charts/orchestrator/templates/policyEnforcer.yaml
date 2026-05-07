@@ -23,6 +23,10 @@ spec:
         env:
         - name: OC_AGENT_HOST
           value: {{ .Values.tracingEndpoint }}
+        - name: LANG
+          value: C.UTF-8
+        - name: LC_ALL
+          value: C.UTF-8
         readinessProbe:
           httpGet:
             path: /api/v1/health

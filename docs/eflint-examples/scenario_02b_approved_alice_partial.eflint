@@ -1,0 +1,60 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Alice requests VU + UVA — partially approved (UVA only)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Alice has a relation at UVA but NOT at VU.
+// The request is overall approved because at least one steward (UVA) passes;
+// VU ends up in invalid_dataproviders.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint              \
+//                        02_agreement_rules.eflint               \
+//                        agreement_VU.eflint                     \
+//                        agreement_UVA.eflint                    \
+//                        scenario_02b_approved_alice_partial.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Alice", dataProviders: ["VU", "UVA"] }
+
++requester(Alice).
++requested-steward(VU).
++requested-steward(UVA).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Overall: at least one steward (UVA) has a relation, so admissible.
+?Holds(permitted-request(Alice)).
+// Expected: true
+
+// Per-steward breakdown:
+?Holds(permitted-at-steward(Alice, VU)).
+// Expected: false — no relation at VU
+
+?Holds(permitted-at-steward(Alice, UVA)).
+// Expected: true
+
+// VU yields nothing:
+?-archetype When valid-archetype(Alice, VU, archetype).
+// Expected: (empty)
+
+// UVA yields DataThroughTtp:
+?-archetype When valid-archetype(Alice, UVA, archetype).
+// Expected: DataThroughTtp
+
+// Act is not permitted for VU (no relation):
+?Holds(submit-data-request(Alice, VU)).
+// Expected: false — act not permitted
+
+submit-data-request(Alice, UVA).
+
+?Holds(data-request(Alice, UVA)).
+// Expected: true

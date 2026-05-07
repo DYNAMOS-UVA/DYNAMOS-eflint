@@ -2,74 +2,59 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/reasoner"
+	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
 	"go.uber.org/zap"
 )
 
-// EflintValidationStrategy validates using the eFLINT policy reasoner.
-// It delegates the pool lifecycle and eFLINT interaction to the Reasoner,
-// mapping the result to a ValidationResult for the ValidationService.
-type EflintValidationStrategy struct {
-	reasoner reasoner.Reasoner
-	logger   *zap.Logger
+// EflintAgreementPhraseProvider is the AgreementPhraseProvider for stewards
+// whose policy is stored as raw Layer-2 eFLINT phrases under
+// /policyEnforcer/eflintModels/{steward}.
+//
+// GetLayer2Phrases simply returns the stored eFLINT text; ValidateAndPersist
+// asks the reasoner to validate the syntax (by sending the phrases to a pool
+// instance) and then stores them.
+type EflintAgreementPhraseProvider struct {
+	modelRepo repository.EflintModelRepository
+	reasoner  reasoner.Reasoner
+	logger    *zap.Logger
 }
 
-// NewEflintValidationStrategy creates a new EflintValidationStrategy.
-func NewEflintValidationStrategy(
-	reasoner reasoner.Reasoner,
+// NewEflintAgreementPhraseProvider creates a new eFLINT phrase provider.
+func NewEflintAgreementPhraseProvider(
+	modelRepo repository.EflintModelRepository,
+	r reasoner.Reasoner,
 	logger *zap.Logger,
-) *EflintValidationStrategy {
-	return &EflintValidationStrategy{
-		reasoner: reasoner,
-		logger:   logger,
+) *EflintAgreementPhraseProvider {
+	return &EflintAgreementPhraseProvider{
+		modelRepo: modelRepo,
+		reasoner:  r,
+		logger:    logger,
 	}
 }
 
-// Name returns the strategy name.
-func (s *EflintValidationStrategy) Name() string {
+// Name returns the provider name.
+func (p *EflintAgreementPhraseProvider) Name() string {
 	return "eflint"
 }
 
-// ValidateAndPersist validates and saves an eFLINT agreement model.
-func (s *EflintValidationStrategy) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
-	return s.reasoner.ValidateAndPersistModel(ctx, steward, string(payload))
-}
-
-// Validate validates a user's access using the eFLINT policy reasoner.
-// The reasoner handles the full lifecycle: acquiring a pool instance, loading
-// the organization's model, querying facts, and releasing the instance.
-func (s *EflintValidationStrategy) Validate(steward, userName string) *ValidationResult {
-	clauses, err := s.reasoner.GetAllAllowedClauses(context.Background(), steward, userName)
+// GetLayer2Phrases retrieves the stored eFLINT phrase block for the steward.
+func (p *EflintAgreementPhraseProvider) GetLayer2Phrases(steward string) (string, bool, error) {
+	text, found, err := p.modelRepo.GetEflintModel(steward)
 	if err != nil {
-		s.logger.Error("eFLINT validation failed",
+		p.logger.Error("failed to retrieve eFLINT model",
 			zap.String("steward", steward),
-			zap.String("user", userName),
 			zap.Error(err),
 		)
-		return invalidResult(steward, "eFLINT validation error: "+err.Error())
+		return "", false, fmt.Errorf("failed to retrieve eFLINT model for %s: %w", steward, err)
 	}
+	return text, found, nil
+}
 
-	// Check if user has any allowed archetypes
-	if len(clauses.Archetypes) == 0 {
-		s.logger.Info("No archetypes allowed for user in eFLINT agreement",
-			zap.String("steward", steward),
-			zap.String("user", userName),
-		)
-		return invalidResult(steward, "no matching archetypes in eFLINT agreement")
-	}
-
-	s.logger.Debug("eFLINT validation successful",
-		zap.String("steward", steward),
-		zap.String("user", userName),
-		zap.Strings("archetypes", clauses.Archetypes),
-		zap.Strings("computeProviders", clauses.ComputeProviders),
-	)
-
-	return &ValidationResult{
-		Steward:             steward,
-		IsValid:             true,
-		MatchedArchetypes:   clauses.Archetypes,
-		MatchedComputeProvs: clauses.ComputeProviders,
-	}
+// ValidateAndPersist asks the reasoner to validate the eFLINT phrases and
+// then saves them to etcd.
+func (p *EflintAgreementPhraseProvider) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
+	return p.reasoner.ValidateAndPersistModel(ctx, steward, string(payload))
 }

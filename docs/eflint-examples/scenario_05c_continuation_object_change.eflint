@@ -1,0 +1,64 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Continuity — Object attribute change (F4)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// UCON re-evaluation trigger: an object attribute changes (VU removes SURF
+// as a supported compute provider). For the DataThroughTtp archetype, which
+// routes data through a TTP, the runtime additionally checks
+// valid-compute-provider; the archetype-level continuation fact still holds
+// but the compute-provider check fails, so the runtime revokes the session.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                     \
+//                        02_agreement_rules.eflint                      \
+//                        agreement_VU.eflint                            \
+//                        scenario_05c_continuation_object_change.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASELINE — Establish a session (hypothetical DataThroughTtp at VU)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Niels", dataProviders: ["VU"] }
+
++requester(Niels).
++requested-steward(VU).
+
+?Holds(permitted-request(Niels)).
+// Expected: true
+
+// Extend Niels's relation to include DataThroughTtp for this scenario.
++relation-allows-archetype(Niels, VU, DataThroughTtp).
+
+submit-data-request(Niels, VU).
+
+?Holds(data-request(Niels, VU)).
+// Expected: true
+
+?Holds(permitted-continuation(Niels, VU, DataThroughTtp)).
+// Expected: true
+
+?Holds(valid-compute-provider(Niels, VU, SURF)).
+// Expected: true
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Object attribute change: VU removes SURF as supported compute provider
+// ═══════════════════════════════════════════════════════════════════════════
+
+-steward-supports-compute-provider(VU, SURF).
+
+// Archetype-level continuation still holds (archetype itself is still valid):
+?Holds(permitted-continuation(Niels, VU, DataThroughTtp)).
+// Expected: true — archetype itself is still valid
+
+// But the runtime's additional compute-provider check for DataThroughTtp fails:
+?Holds(valid-compute-provider(Niels, VU, SURF)).
+// Expected: false — no usable compute provider; runtime revokes the session
+
+// Restore.
++steward-supports-compute-provider(VU, SURF).
+-relation-allows-archetype(Niels, VU, DataThroughTtp).

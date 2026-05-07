@@ -1,0 +1,44 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Alice requests UVA — approved, but archetype set is restricted
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Alice is permitted at UVA but her relation only allows DataThroughTtp.
+// UVA also supports ComputeToData and ReproducableScience at the agreement
+// level, but the intersection with Alice's relation yields DataThroughTtp only.
+// ComputeToData and ReproducableScience are explicitly confirmed not valid.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                          \
+//                        02_agreement_rules.eflint                           \
+//                        agreement_UVA.eflint                                \
+//                        scenario_04b_denied_alice_restricted_archetype.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Alice", dataProviders: ["UVA"] }
+// Alice is permitted at UVA, but only for DataThroughTtp.
+
++requester(Alice).
++requested-steward(UVA).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+?Holds(permitted-at-steward(Alice, UVA)).
+// Expected: true
+
+?Holds(valid-archetype(Alice, UVA, ComputeToData)).
+// Expected: false
+
+?Holds(valid-archetype(Alice, UVA, ReproducableScience)).
+// Expected: false
+
+?-archetype When valid-archetype(Alice, UVA, archetype).
+// Expected: DataThroughTtp

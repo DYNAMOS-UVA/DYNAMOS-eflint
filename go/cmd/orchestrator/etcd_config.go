@@ -71,25 +71,44 @@ func registerPolicyEnforcerConfiguration() {
 		}
 	}
 
-	// Load eFLINT models
+	// Load eFLINT layered specifications.
+	//
+	// File-name routing convention:
+	//   01_interface_policy.eflint   -> /policyEnforcer/eflintLayer1/interface
+	//                                    (informational; the policy-enforcer
+	//                                    binary embeds Layer 1 too)
+	//   02_agreement_rules.eflint    -> /policyEnforcer/eflintRules/shared
+	//                                    (Layer 2 shared rules)
+	//   <steward>.eflint             -> /policyEnforcer/eflintModels/<steward>
+	//                                    (Layer 2 per-steward agreement)
 	logger.Debug("Loading eFLINT models from directory", zap.String("directory", eflintModelsDirectory))
 	eflintFiles, err := ioutil.ReadDir(eflintModelsDirectory)
 	if err != nil {
 		logger.Error("Failed to read eFLINT models directory", zap.Error(err))
 	} else {
 		for _, file := range eflintFiles {
-			if !file.IsDir() && filepath.Ext(file.Name()) == ".eflint" {
-				filePath := filepath.Join(eflintModelsDirectory, file.Name())
-				content, readErr := ioutil.ReadFile(filePath)
-				if readErr != nil {
-					logger.Error("Failed to read eFLINT model file", zap.String("file", file.Name()), zap.Error(readErr))
-					continue
-				}
-				// Extract model name from filename (without .eflint extension)
-				modelName := file.Name()[:len(file.Name())-len(".eflint")]
-				etcd.PutValueToEtcd(etcdClient, fmt.Sprintf("/policyEnforcer/eflintModels/%s", modelName), string(content))
-				logger.Debug("Loaded eFLINT model", zap.String("model", modelName))
+			if file.IsDir() || filepath.Ext(file.Name()) != ".eflint" {
+				continue
 			}
+			filePath := filepath.Join(eflintModelsDirectory, file.Name())
+			content, readErr := ioutil.ReadFile(filePath)
+			if readErr != nil {
+				logger.Error("Failed to read eFLINT model file", zap.String("file", file.Name()), zap.Error(readErr))
+				continue
+			}
+			modelName := file.Name()[:len(file.Name())-len(".eflint")]
+
+			var key string
+			switch modelName {
+			case "01_interface_policy":
+				key = "/policyEnforcer/eflintLayer1/interface"
+			case "02_agreement_rules":
+				key = "/policyEnforcer/eflintRules/shared"
+			default:
+				key = fmt.Sprintf("/policyEnforcer/eflintModels/%s", modelName)
+			}
+			etcd.PutValueToEtcd(etcdClient, key, string(content))
+			logger.Debug("Loaded eFLINT spec", zap.String("name", modelName), zap.String("etcdKey", key))
 		}
 	}
 

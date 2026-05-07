@@ -1,0 +1,40 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Bob requests SURF_org — denied (no agreement registered)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// SURF_org is referenced as a data steward but has no agreement in the
+// knowledge base. The request is denied because permitted-request requires
+// at least one admitted steward, and none exists here.
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint                  \
+//                        02_agreement_rules.eflint                   \
+//                        scenario_03a_denied_bob_no_agreement.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Bob", dataProviders: ["SURF_org"] }
+// SURF_org has no agreement registered.
+
++requester(Bob).
++data-steward(SURF_org).
++requested-steward(SURF_org).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+?Holds(agreement(SURF_org)).
+// Expected: false
+
+?Holds(permitted-at-steward(Bob, SURF_org)).
+// Expected: false
+
+?Holds(permitted-request(Bob)).
+// Expected: false

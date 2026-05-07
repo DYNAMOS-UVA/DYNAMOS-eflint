@@ -1,0 +1,71 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario: Niels requests VU and UVA — approved
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// To run (keeps the REPL open: `cat` holds stdin after flatten exits):
+//
+//   ( python3 flatten.py 01_interface_policy.eflint \
+//                      02_agreement_rules.eflint  \
+//                      agreement_VU.eflint        \
+//                      agreement_UVA.eflint       \
+//                      scenario_01_approved.eflint \
+//       ; cat ) | eflint-repl
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Request facts
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RequestApproval: { user: "Niels", dataProviders: ["VU", "UVA"] }
+
++requester(Niels).
++requested-steward(VU).
++requested-steward(UVA).
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Queries
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Overall admissibility.
+?Holds(permitted-request(Niels)).
+// Expected: true
+
+// Per-steward.
+?Holds(permitted-at-steward(Niels, VU)).
+// Expected: true
+
+?Holds(permitted-at-steward(Niels, UVA)).
+// Expected: true
+
+// Discovery: valid archetypes per steward.
+?-archetype When valid-archetype(Niels, VU, archetype).
+// Expected: ComputeToData
+
+?-archetype When valid-archetype(Niels, UVA, archetype).
+// Expected: ComputeToData, DataThroughTtp
+
+// Discovery: valid compute providers per steward.
+?-compute-provider When valid-compute-provider(Niels, VU, compute-provider).
+// Expected: SURF
+
+?-compute-provider When valid-compute-provider(Niels, UVA, compute-provider).
+// Expected: SURF
+
+// Submit.
+submit-data-request(Niels, VU).
+submit-data-request(Niels, UVA).
+
+?Holds(data-request(Niels, VU)).
+// Expected: true
+
+?Holds(data-request(Niels, UVA)).
+// Expected: true
+
+// Sessions established — verify continuation.
+?Holds(permitted-continuation(Niels, VU, ComputeToData)).
+// Expected: true
+
+?Holds(permitted-continuation(Niels, UVA, ComputeToData)).
+// Expected: true

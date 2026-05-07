@@ -24,7 +24,7 @@ var port = ":8082"
 var apiVersion = "/api/v1"
 
 var eflintServerPath = "eflint-server"
-var eflintModelPath = addPolicyEnforcerDir("eflint/empty.eflint")
+var eflintModelPath = addPolicyEnforcerDir("eflint/01_interface_policy.eflint")
 var eflintTimeout = 60 * time.Second
 var eflintStartupDelay = 3 * time.Second
 var eflintMinPort = 1025

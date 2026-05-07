@@ -1,0 +1,34 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// DYNAMOS Policy Enforcer — Agreement: VU
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Corresponds to the etcd entry at /policyEnforcer/agreements/VU.
+//
+// Requires: 01_interface_policy.eflint + 02_agreement_rules.eflint
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Layer 2b — Per-steward agreement for VU (agreement_VU.eflint)
+
+// Type instances referenced by this agreement.
++data-steward(VU).
++archetype(ComputeToData).
++archetype(DataThroughTtp).
++compute-provider(SURF).
++dataset(WageGap).
++request-type(SqlDataRequest).
+
++agreement(VU).
+
+// Archetypes supported at the agreement level.
++steward-supports-archetype(VU, ComputeToData).
++steward-supports-archetype(VU, DataThroughTtp).
+
+// Compute providers accepted by VU.
++steward-supports-compute-provider(VU, SURF).
+
+// ── Relation: Niels ──────────────────────────────────────────────────────
++has-relation(Niels, VU).
++relation-allows-request-type(Niels, VU, SqlDataRequest).
++relation-allows-dataset(Niels, VU, WageGap).
++relation-allows-archetype(Niels, VU, ComputeToData).
++relation-allows-compute-provider(Niels, VU, SURF).

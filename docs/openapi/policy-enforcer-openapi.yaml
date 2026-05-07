@@ -2,54 +2,28 @@ openapi: 3.0.3
 info:
   title: DYNAMOS Policy Enforcer API
   description: |
-    API for policy enforcement in the DYNAMOS system.
+    HTTP API for the DYNAMOS Policy Enforcer.
     
-    This API provides two levels of abstraction:
+    The request-approval flow itself is RabbitMQ-driven (see the request_approval
+    diagrams). This HTTP API exposes:
     
     ## Policy Enforcer API (`/policy-enforcer/*`)
-    High-level, reasoner-agnostic interface for policy validation. This API is designed
-    to work with different reasoning engines (eFLINT, Symboleo, JSON-based, etc.) through
-    a common interface. Use these endpoints for:
-    - **Allowed Clauses**: Query all allowed request types, datasets, archetypes, and compute
-      providers for a specific requester at an organization in a single call
-    - **Request Validation**: Check if a specific data request is permitted by the policy
+    Read-only / simulation endpoints for policy engineers to test the effects
+    of a Layer-2 agreement without going through the RabbitMQ pipeline.
+    Both endpoints share the same code path the request-approval flow uses,
+    so they exercise the production layered eFLINT pipeline.
+    - **Allowed Clauses**: Introspect the steward-supports-* and relation-allows-*
+      facts derived from a steward's Layer-2 phrases (optionally narrowed to one requester).
+    - **Validate (simulated)**: Run a full layered evaluation for a given user and
+      array of stewards, returning the same `pb.ValidationResponse` shape produced
+      by the RabbitMQ flow.
     
     ## eFLINT API (`/eflint/*`)
     Low-level interface for direct eFLINT server management. Use these endpoints for:
     - **Instance Management**: Start, stop, and monitor eFLINT server instances
     - **Commands**: Send raw commands to the eFLINT server
     - **State Management (POC)**: Export, import, and checkpoint eFLINT execution graphs
-    
-    ## Architecture
-    ```
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │                           HTTP/gRPC Layer                                │
-    ├─────────────────────────────────────────────────────────────────────────┤
-    │  Policy Enforcer API              │  eFLINT API                         │
-    │  /policy-enforcer/*               │  /eflint/*                          │
-    │  (Reasoner-agnostic)              │  (eFLINT-specific)                  │
-    └────────────────┬──────────────────┴───────────────────┬─────────────────┘
-                     │                                       │
-                     ▼                                       │
-    ┌─────────────────────────────────┐                      │
-    │      Reasoner Interface         │                      │
-    │  - eFLINT Reasoner              │                      │
-    │  - (Future: Symboleo, JSON)     │◄─────────────────────┘
-    └────────────────┬────────────────┘
-                     │
-                     ▼
-    ┌─────────────────────────────────┐
-    │        eFLINT Manager           │
-    │   (Process lifecycle, TCP)      │
-    └────────────────┬────────────────┘
-                     │
-                     ▼ TCP
-    ┌─────────────────────────────────┐
-    │       eFLINT Server             │
-    │    (external process)           │
-    └─────────────────────────────────┘
-    ```
-  version: 2.0.0
+  version: 3.1.0
   contact:
     name: Niels Arts
 
@@ -1015,42 +989,61 @@ paths:
                     example: "healthy"
 
   # ---------------------------------------------------------------------------
-  # Policy Enforcer Endpoints (Reasoner-Agnostic)
+  # Policy Enforcer Endpoints (policy-engineer testing)
   # ---------------------------------------------------------------------------
   /api/v1/policy-enforcer/allowed-clauses:
     get:
-      summary: Get all allowed clauses
+      summary: Introspect a steward's allowed clauses
       description: |
-        Returns all allowed clauses (request types, data sets, archetypes, and compute providers)
-        for a requester at an organization in a single request.
-        This is the primary endpoint for querying what a requester is allowed to do.
-      operationId: getAllAllowedClauses
+        Loads Layer 1 + Layer 2 (shared + per-steward) onto a clean eFLINT
+        pool entry and returns the steward-supports-* and relation-allows-*
+        facts derived from the steward's Layer-2 specification.
+
+        - `steward` is required and identifies the data steward.
+        - `requester` is optional; when set, only that requester's relation
+          is returned (other relations are dropped from the response).
+
+        No Layer 3 is pushed and no Acts are fired, so this endpoint has no
+        side effects.
+      operationId: getAllowedClauses
       tags:
         - Policy Enforcer
       parameters:
-        - $ref: '#/components/parameters/OrganizationParam'
-        - $ref: '#/components/parameters/RequesterParam'
+        - name: steward
+          in: query
+          required: true
+          description: The data steward to introspect
+          schema:
+            type: string
+          example: VU
+        - name: requester
+          in: query
+          required: false
+          description: Optional requester to narrow the response to a single relation
+          schema:
+            type: string
+          example: jorrit.stutterheim@cloudnation.nl
       responses:
         '200':
-          description: All allowed clauses retrieved successfully
+          description: Allowed clauses retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AllAllowedClausesResponse'
+                $ref: '#/components/schemas/StewardClauses'
         '400':
-          description: Bad request - missing required parameters
+          description: Bad request — steward parameter is missing
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
+        '404':
+          description: No agreement registered for the given steward
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
-          description: Internal server error
+          description: Internal error (e.g. eFLINT pool exhausted, parse error)
           content:
             application/json:
               schema:
@@ -1058,18 +1051,16 @@ paths:
 
   /api/v1/policy-enforcer/validate:
     post:
-      summary: Validate request
+      summary: Simulate a request approval
       description: |
-        Validates whether a specific data request is allowed according to the policy.
-        
-        This endpoint checks all aspects of the request:
-        - Request type is allowed
-        - Data set is allowed
-        - Archetype is allowed
-        - Compute provider is allowed
-        - The combination is permitted by the agreement
-        
-        This is the main endpoint for policy enforcement in DYNAMOS.
+        Runs the same layered evaluation the RabbitMQ flow uses, but driven
+        by an HTTP body rather than a `pb.RequestApproval` message. The body
+        carries the user (requester) and the array of data stewards; the
+        response is the resulting `pb.ValidationResponse`.
+
+        The eFLINT pool restarts each instance on release, so the
+        `submit-data-request` Acts fired by a permitted steward have no
+        persistent side effects.
       operationId: validateRequest
       tags:
         - Policy Enforcer
@@ -1078,47 +1069,31 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ValidateRequestParams'
+              $ref: '#/components/schemas/ValidateRequestBody'
             examples:
-              allowed_request:
-                summary: Request that should be allowed
+              two_stewards:
+                summary: User with two requested stewards
                 value:
-                  organization: "VU"
-                  requester: "jorrit.stutterheim@cloudnation.nl"
-                  request_type: "sqlDataRequest"
-                  data_set: "wageGap"
-                  archetype: "dataThroughTtp"
-                  compute_provider: "SURF"
-              denied_request:
-                summary: Request that should be denied (computeToData was revoked)
+                  user:
+                    id: "1"
+                    user_name: "jorrit.stutterheim@cloudnation.nl"
+                  data_providers: ["VU", "UVA"]
+              mixed_with_legacy:
+                summary: Mixing eFLINT-format and legacy-JSON stewards
                 value:
-                  organization: "VU"
-                  requester: "jorrit.stutterheim@cloudnation.nl"
-                  request_type: "sqlDataRequest"
-                  data_set: "wageGap"
-                  archetype: "computeToData"
-                  compute_provider: "SURF"
+                  user:
+                    id: "1"
+                    user_name: "jorrit.stutterheim@cloudnation.nl"
+                  data_providers: ["VU", "UVA", "RUG"]
       responses:
         '200':
-          description: Validation completed (check 'allowed' field for result)
+          description: Evaluation completed (inspect `request_approved` and per-steward maps)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ValidationResponse'
         '400':
-          description: Bad request - missing required fields
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Reasoner is not running
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
+          description: Bad request — body is missing required fields
           content:
             application/json:
               schema:
@@ -1132,24 +1107,6 @@ components:
   # Reusable Parameters
   # ---------------------------------------------------------------------------
   parameters:
-    OrganizationParam:
-      name: organization
-      in: query
-      required: true
-      description: The organization/steward identifier
-      schema:
-        type: string
-      example: VU
-
-    RequesterParam:
-      name: requester
-      in: query
-      required: true
-      description: The requester/user identifier (typically an email)
-      schema:
-        type: string
-      example: jorrit.stutterheim@cloudnation.nl
-
     InstanceIdParam:
       name: instance_id
       in: query
@@ -1332,116 +1289,6 @@ components:
           example: 5
 
     # -------------------------------------------------------------------------
-    # Policy Enforcer Schemas
-    # -------------------------------------------------------------------------
-    AllAllowedClausesResponse:
-      type: object
-      properties:
-        organization:
-          type: string
-          description: The organization/steward identifier
-          example: VU
-        requester:
-          type: string
-          description: The requester/user identifier
-          example: jorrit.stutterheim@cloudnation.nl
-        request_types:
-          type: array
-          items:
-            type: string
-          description: List of allowed request types
-          example: ["sqlDataRequest", "genericRequest"]
-        data_sets:
-          type: array
-          items:
-            type: string
-          description: List of allowed datasets
-          example: ["wageGap"]
-        archetypes:
-          type: array
-          items:
-            type: string
-          description: List of allowed archetypes
-          example: ["dataThroughTtp", "reproducableScience"]
-        compute_providers:
-          type: array
-          items:
-            type: string
-          description: List of allowed compute providers
-          example: ["SURF"]
-
-    ValidateRequestParams:
-      type: object
-      required:
-        - organization
-        - requester
-        - request_type
-        - data_set
-        - archetype
-        - compute_provider
-      properties:
-        organization:
-          type: string
-          description: The data steward organization
-          example: "VU"
-        requester:
-          type: string
-          description: The user making the request
-          example: "jorrit.stutterheim@cloudnation.nl"
-        request_type:
-          type: string
-          description: Type of request
-          example: "sqlDataRequest"
-        data_set:
-          type: string
-          description: The dataset being requested
-          example: "wageGap"
-        archetype:
-          type: string
-          description: The processing archetype
-          example: "dataThroughTtp"
-        compute_provider:
-          type: string
-          description: Where the computation runs
-          example: "SURF"
-
-    ValidationResponse:
-      type: object
-      properties:
-        allowed:
-          type: boolean
-          description: Whether the request is permitted
-          example: true
-        reason:
-          type: string
-          description: Explanation for the decision
-          example: "Request is permitted by the agreement"
-        organization:
-          type: string
-          description: The organization checked
-          example: "VU"
-        requester:
-          type: string
-          description: The requester checked
-          example: "jorrit.stutterheim@cloudnation.nl"
-        request_type:
-          type: string
-          description: The request type checked
-          example: "sqlDataRequest"
-        data_set:
-          type: string
-          description: The dataset checked
-          example: "wageGap"
-        archetype:
-          type: string
-          description: The archetype checked
-          example: "dataThroughTtp"
-        compute_provider:
-          type: string
-          description: The compute provider checked
-          example: "SURF"
-
-    # -------------------------------------------------------------------------
     # State Management Schemas
     # -------------------------------------------------------------------------
     StateResponse:
@@ -1556,6 +1403,164 @@ components:
           example: "before-test"
 
     # -------------------------------------------------------------------------
+    # Policy Enforcer Schemas (policy-engineer testing)
+    # -------------------------------------------------------------------------
+    StewardClauses:
+      type: object
+      description: Read-only summary of a steward's Layer-2 specification.
+      properties:
+        steward:
+          type: string
+          example: VU
+        supported_archetypes:
+          type: array
+          items:
+            type: string
+          description: |
+            Archetypes the steward declares it supports
+            (`steward-supports-archetype` facts).
+          example: ["computeToData", "dataThroughTtp"]
+        supported_compute_providers:
+          type: array
+          items:
+            type: string
+          description: |
+            Compute providers the steward declares it supports
+            (`steward-supports-compute-provider` facts).
+          example: ["SURF"]
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequesterClauses'
+          description: |
+            Per-requester relation snapshot. When the `requester` query
+            parameter is provided this list contains at most one entry.
+
+    RequesterClauses:
+      type: object
+      description: |
+        What a single requester is allowed to do at the steward, derived
+        from the `relation-allows-*` facts in the steward's Layer-2
+        specification.
+      properties:
+        requester:
+          type: string
+          example: jorrit.stutterheim@cloudnation.nl
+        request_types:
+          type: array
+          items: { type: string }
+          example: ["sqlDataRequest", "genericRequest"]
+        datasets:
+          type: array
+          items: { type: string }
+          example: ["wageGap"]
+        archetypes:
+          type: array
+          items: { type: string }
+          example: ["computeToData", "dataThroughTtp"]
+        compute_providers:
+          type: array
+          items: { type: string }
+          example: ["SURF"]
+
+    ValidateRequestBody:
+      type: object
+      required: [user, data_providers]
+      description: |
+        Mirrors the relevant fields of `pb.RequestApproval` so a policy
+        engineer can drive the same layered evaluation the RabbitMQ flow
+        uses.
+      properties:
+        user:
+          type: object
+          required: [user_name]
+          properties:
+            id:
+              type: string
+              example: "1"
+            user_name:
+              type: string
+              example: jorrit.stutterheim@cloudnation.nl
+        data_providers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example: ["VU", "UVA", "RUG"]
+        type:
+          type: string
+          description: Optional message type; defaults to "requestApproval".
+          example: requestApproval
+        options:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    ValidationResponse:
+      type: object
+      description: |
+        JSON projection of `pb.ValidationResponse`. Same shape as the
+        RabbitMQ response published to the orchestrator.
+      properties:
+        type:
+          type: string
+          example: validationResponse
+        request_type:
+          type: string
+          example: requestApproval
+        request_approved:
+          type: boolean
+          example: true
+        user:
+          type: object
+          properties:
+            id: { type: string, example: "1" }
+            user_name: { type: string, example: jorrit.stutterheim@cloudnation.nl }
+        valid_dataproviders:
+          type: object
+          description: |
+            Map keyed by steward; each value lists the archetypes and
+            compute providers that satisfy `valid-archetype` /
+            `valid-compute-provider` for the requester at that steward.
+          additionalProperties:
+            type: object
+            properties:
+              archetypes:
+                type: array
+                items: { type: string }
+              compute_providers:
+                type: array
+                items: { type: string }
+        invalid_dataproviders:
+          type: array
+          items:
+            type: string
+          description: |
+            Stewards that are not approved (no agreement, or
+            `permitted-at-steward` did not hold).
+        valid_archetypes:
+          type: object
+          properties:
+            user_name: { type: string }
+            archetypes:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  archetypes:
+                    type: array
+                    items: { type: string }
+        auth:
+          type: object
+          properties:
+            access_token: { type: string }
+            refresh_token: { type: string }
+        options:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    # -------------------------------------------------------------------------
     # Common Schemas
     # -------------------------------------------------------------------------
     ErrorResponse:
@@ -1582,9 +1587,10 @@ components:
 tags:
   - name: Policy Enforcer
     description: |
-      Reasoner-agnostic policy enforcement endpoints. Use these for validating requests
-      and querying allowed clauses. Works with any configured reasoning engine (eFLINT,
-      Symboleo, JSON-based, etc.).
+      Read-only / simulation endpoints for policy engineers to test the
+      effects of a Layer-2 agreement. Both endpoints share the production
+      layered eFLINT pipeline so what you test here is what the RabbitMQ
+      request-approval flow runs.
   - name: Instance Management
     description: |
       Low-level endpoints for managing the eFLINT server instance lifecycle.
