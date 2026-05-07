@@ -18,7 +18,6 @@ that zoom into the internal logic of each microservice.
 
 ```plantuml
 @startuml Activity - High Level Overview
-!theme cerulean
 
 title Policy Update — High-Level Activity
 
@@ -58,7 +57,6 @@ stop
 
 ```plantuml
 @startuml Activity - Orchestrator Trigger
-!theme cerulean
 
 title Orchestrator — Trigger Phase Activity (checkJobs)
 
@@ -94,7 +92,6 @@ stop
 
 ```plantuml
 @startuml Activity - evaluateArchetypeInActiveJobs
-!theme cerulean
 
 title Orchestrator — evaluateArchetypeInActiveJobs Activity
 
@@ -129,7 +126,6 @@ stop
 
 ```plantuml
 @startuml Activity - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — checkPolicyUpdate Activity
 
@@ -186,7 +182,6 @@ end note
 
 ```plantuml
 @startuml Activity - processPolicyUpdate
-!theme cerulean
 
 title Orchestrator — processPolicyUpdate Activity
 
@@ -253,7 +248,6 @@ stop
 
 ```plantuml
 @startuml Sequence - High Level Overview
-!theme cerulean
 
 title Policy Update — High-Level Sequence
 
@@ -297,7 +291,6 @@ deactivate Orch
 
 ```plantuml
 @startuml Sequence - Full Detail
-!theme cerulean
 
 title Policy Update — Full Detailed Sequence
 
@@ -433,7 +426,6 @@ end
 
 ```plantuml
 @startuml Sequence - Orchestrator Trigger
-!theme cerulean
 
 title Orchestrator — Trigger Phase Sequence
 
@@ -496,7 +488,6 @@ deactivate CheckJobs
 
 ```plantuml
 @startuml Sequence - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — checkPolicyUpdate Sequence
 
@@ -545,7 +536,6 @@ deactivate Router
 
 ```plantuml
 @startuml Sequence - Orchestrator Process
-!theme cerulean
 
 title Orchestrator — processPolicyUpdate Sequence
 
@@ -632,7 +622,6 @@ A static view of the DYNAMOS components involved in the policy update flow.
 
 ```plantuml
 @startuml Architecture Diagram
-!theme cerulean
 
 title DYNAMOS — Policy Update Architecture Overview
 
@@ -681,7 +670,6 @@ orch -- etcd
 
 ```plantuml
 @startuml Policy Update Component Diagram
-!theme cerulean
 
 title DYNAMOS - Policy Update Components
 
@@ -743,7 +731,6 @@ Shows how the `PolicyUpdate` message content evolves as it passes through the sy
 
 ```plantuml
 @startuml PolicyUpdate Lifecycle
-!theme cerulean
 
 title PolicyUpdate Message — Lifecycle
 
@@ -773,7 +760,6 @@ Shows which etcd paths are read/written at each stage of the policy update.
 
 ```plantuml
 @startuml etcd Data Flow
-!theme cerulean
 
 title Policy Update — etcd Data Flow
 

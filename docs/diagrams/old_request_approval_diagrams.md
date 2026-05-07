@@ -14,7 +14,6 @@ that zoom into the internal logic of each microservice.
 
 ```plantuml
 @startuml Activity - High Level Overview
-!theme cerulean
 
 title Request Approval — High-Level Activity
 
@@ -51,7 +50,6 @@ stop
 
 ```plantuml
 @startuml Activity - API Gateway Request
-!theme cerulean
 
 title API Gateway — Request Phase Activity
 
@@ -85,7 +83,6 @@ end note
 
 ```plantuml
 @startuml Activity - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — Activity
 
@@ -140,7 +137,6 @@ stop
 
 ```plantuml
 @startuml Activity - Orchestrator
-!theme cerulean
 
 title Orchestrator — Activity
 
@@ -187,7 +183,6 @@ stop
 
 ```plantuml
 @startuml Activity - API Gateway Response
-!theme cerulean
 
 title API Gateway — Response Phase Activity
 
@@ -223,7 +218,6 @@ stop
 
 ```plantuml
 @startuml Activity - Agent
-!theme cerulean
 
 title Agent — Activity
 
@@ -257,12 +251,11 @@ stop
 
 ```plantuml
 @startuml Sequence - High Level Overview
-!theme cerulean
 
 title Request Approval — High-Level Sequence
 
 actor "Data Analyst" as Client
-box "DYNAMOS Platform" #LightBlue
+box "DYNAMOS Platform"
     participant "API Gateway"     as API
     participant "Policy Enforcer" as PE
     participant "Orchestrator"    as Orch
@@ -294,7 +287,6 @@ API --> Client : HTTP 200 {jobId, responses[]}
 
 ```plantuml
 @startuml Sequence - API Gateway Request
-!theme cerulean
 
 title API Gateway — Request Phase Sequence
 
@@ -327,7 +319,6 @@ end note
 
 ```plantuml
 @startuml Sequence - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — Sequence
 
@@ -378,7 +369,6 @@ deactivate Router
 
 ```plantuml
 @startuml Sequence - Orchestrator
-!theme cerulean
 
 title Orchestrator — Sequence
 
@@ -445,7 +435,6 @@ deactivate Router
 
 ```plantuml
 @startuml Sequence - API Gateway Response
-!theme cerulean
 
 title API Gateway — Response Phase Sequence
 
@@ -490,7 +479,6 @@ deactivate Handler
 
 ```plantuml
 @startuml Sequence - Agent
-!theme cerulean
 
 title Agent — Sequence
 
@@ -532,7 +520,6 @@ considering any specific flow.
 
 ```plantuml
 @startuml Architecture Diagram
-!theme cerulean
 
 title DYNAMOS — Architecture Overview
 
@@ -589,7 +576,6 @@ api --> ds3 : HTTP
 
 ```plantuml
 @startuml Request Approval Component Diagram
-!theme cerulean
 
 title DYNAMOS - Request Approval Components
 

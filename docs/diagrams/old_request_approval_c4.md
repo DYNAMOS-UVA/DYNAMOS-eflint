@@ -212,7 +212,6 @@ from the legacy protobuf definitions.
 
 ```plantuml
 @startuml C4_Level4_Code
-!theme cerulean
 
 title Legacy Request Approval — Key Data Structures (Level 4)
 
@@ -303,7 +302,6 @@ and all of its nested types in a single view.
 
 ```plantuml
 @startuml C4_Level4_ValidationResponse_FullStructure
-!theme cerulean
 
 title ValidationResponse — Full Protobuf Structure
 
@@ -357,7 +355,6 @@ UserArchetypes --> "0..*" UserAllowedArchetypes : archetypes\n(map key = provide
 
 ```plantuml
 @startuml C4_Level4_etcd
-!theme cerulean
 
 title Legacy Request Approval — etcd Key Space (Level 4)
 

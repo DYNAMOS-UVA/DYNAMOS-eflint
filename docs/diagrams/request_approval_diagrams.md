@@ -21,7 +21,6 @@ that zoom into the internal logic of each microservice.
 
 ```plantuml
 @startuml Activity - High Level Overview
-!theme cerulean
 
 title Request Approval — High-Level Activity
 
@@ -59,7 +58,6 @@ stop
 
 ```plantuml
 @startuml Activity - API Gateway Request
-!theme cerulean
 
 title API Gateway — Request Phase Activity
 
@@ -93,7 +91,6 @@ end note
 
 ```plantuml
 @startuml Activity - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — Dual-Strategy Validation Activity
 
@@ -194,7 +191,6 @@ stop
 
 ```plantuml
 @startuml Activity - eFLINT Pool Lifecycle
-!theme cerulean
 
 title eFLINT Instance Pool — Lifecycle Activity
 
@@ -268,7 +264,6 @@ stop
 
 ```plantuml
 @startuml Activity - Orchestrator
-!theme cerulean
 
 title Orchestrator — Activity
 
@@ -315,7 +310,6 @@ stop
 
 ```plantuml
 @startuml Activity - API Gateway Response
-!theme cerulean
 
 title API Gateway — Response Phase Activity
 
@@ -351,7 +345,6 @@ stop
 
 ```plantuml
 @startuml Activity - Agent
-!theme cerulean
 
 title Agent — Activity
 
@@ -385,7 +378,6 @@ stop
 
 ```plantuml
 @startuml Sequence - High Level Overview
-!theme cerulean
 
 title Request Approval — High-Level Sequence
 
@@ -429,7 +421,6 @@ API --> Client : HTTP 200 {jobId, responses[]}
 
 ```plantuml
 @startuml Sequence - API Gateway Request
-!theme cerulean
 
 title API Gateway — Request Phase Sequence
 
@@ -466,7 +457,6 @@ interaction, see [§2.4](#24-policy-enforcer--eflint-pool-acquirerelease-cycle).
 
 ```plantuml
 @startuml Sequence - Policy Enforcer (Simplified)
-!theme cerulean
 
 title Policy Enforcer — Dual-Strategy Sequence (Simplified)
 
@@ -537,7 +527,6 @@ including the eFLINT pool acquire/release and legacy agreement lookups.
 
 ```plantuml
 @startuml Sequence - Policy Enforcer
-!theme cerulean
 
 title Policy Enforcer — Dual-Strategy Sequence (Detailed)
 
@@ -658,7 +647,6 @@ deactivate Router
 
 ```plantuml
 @startuml Sequence - eFLINT Pool Cycle
-!theme cerulean
 
 title eFLINT Pool — Acquire/Release Cycle
 
@@ -733,7 +721,6 @@ deactivate Pool
 
 ```plantuml
 @startuml Sequence - Policy Enforcer HTTP API
-!theme cerulean
 
 title Policy Enforcer — HTTP API Query Flow
 
@@ -835,7 +822,6 @@ deactivate Routes
 
 ```plantuml
 @startuml Sequence - Orchestrator
-!theme cerulean
 
 title Orchestrator — Sequence
 
@@ -902,7 +888,6 @@ deactivate Router
 
 ```plantuml
 @startuml Sequence - API Gateway Response
-!theme cerulean
 
 title API Gateway — Response Phase Sequence
 
@@ -947,7 +932,6 @@ deactivate Handler
 
 ```plantuml
 @startuml Sequence - Agent
-!theme cerulean
 
 title Agent — Sequence
 
@@ -984,7 +968,6 @@ deactivate DataHandler
 
 ```plantuml
 @startuml Sequence - Policy Update
-!theme cerulean
 
 title Policy Update Flow — Sequence
 
@@ -1032,7 +1015,6 @@ show the eFLINT subsystem within the Policy Enforcer.
 
 ```plantuml
 @startuml Architecture Diagram
-!theme cerulean
 
 title DYNAMOS — Architecture Overview
 
@@ -1101,7 +1083,6 @@ api --> ds3 : HTTP
 
 ```plantuml
 @startuml Request Approval Component Diagram
-!theme cerulean
 
 title DYNAMOS — Request Approval Components
 
@@ -1183,7 +1164,6 @@ q_agent --> agent_surf
 
 ```plantuml
 @startuml PE Software Architecture - Strategy Pattern
-!theme cerulean
 
 title Policy Enforcer — Strategy Pattern & Validation Pipeline
 
@@ -1247,7 +1227,6 @@ ValSvc --> "ProviderConfigRepository" : resolves strategy via
 
 ```plantuml
 @startuml PE Software Architecture - Reasoner
-!theme cerulean
 allowmixing
 
 title Policy Enforcer — Reasoner Abstraction & HTTP API Layer
@@ -1308,7 +1287,6 @@ ER --> ModelRepoRef : loads models from etcd
 
 ```plantuml
 @startuml PE Software Architecture - Repositories
-!theme cerulean
 allowmixing
 
 title Policy Enforcer — Repository Pattern
@@ -1371,7 +1349,6 @@ EESR --> etcd : /policyEnforcer/\neflint-states/{provider}
 
 ```plantuml
 @startuml PE Software Architecture - Pool
-!theme cerulean
 
 title Policy Enforcer — eFLINT Instance Pool Architecture
 
@@ -1451,7 +1428,6 @@ PE --> SM : manages state via
 
 ```plantuml
 @startuml Deployment Diagram
-!theme cerulean
 
 title DYNAMOS — Deployment Overview (Kubernetes)
 

@@ -279,7 +279,6 @@ level is derived from the current codebase.
 
 ```plantuml
 @startuml C4_Level4_Code
-!theme cerulean
 
 title Request Approval — Key Data Structures (Level 4)
 
@@ -396,7 +395,6 @@ UserArchetypes --> "0..*" UserAllowedArchetypes : archetypes\n(map key = provide
 
 ```plantuml
 @startuml C4_Level4_PE_Types
-!theme cerulean
 
 title Policy Enforcer — Internal Types (Level 4)
 
@@ -513,7 +511,6 @@ Reasoner --> ValidateRequestParams : accepts
 
 ```plantuml
 @startuml C4_Level4_etcd
-!theme cerulean
 
 title Request Approval — etcd Key Space (Level 4)
 

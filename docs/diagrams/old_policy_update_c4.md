@@ -240,7 +240,6 @@ policy update and the etcd key-space that underpins the system.
 
 ```plantuml
 @startuml C4_Level4_Code
-!theme cerulean
 
 title Legacy Policy Update — Key Data Structures (Level 4)
 
@@ -330,7 +329,6 @@ CompositionRequest ..> "{agent}-in" : sent to (phase 5,\nif archetype changes)
 
 ```plantuml
 @startuml C4_Level4_etcd
-!theme cerulean
 
 title Legacy Policy Update — etcd Key Space (Level 4)
 
@@ -409,7 +407,6 @@ end note
 
 ```plantuml
 @startuml C4_Level4_GoModels
-!theme cerulean
 
 title Legacy Policy Update — Go Models (Level 4)
 
