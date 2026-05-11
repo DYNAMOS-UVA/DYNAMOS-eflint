@@ -30,11 +30,11 @@
 // Compute providers accepted by VU.
 +steward-supports-compute-provider("VU", "SURF").
 
-// ── Relation: jorrit.stutterheim@cloudnation.nl ────────────────────────────
-+has-relation("jorrit.stutterheim@cloudnation.nl", "VU").
-+relation-allows-request-type("jorrit.stutterheim@cloudnation.nl", "VU", "sqlDataRequest").
-+relation-allows-request-type("jorrit.stutterheim@cloudnation.nl", "VU", "genericRequest").
-+relation-allows-dataset("jorrit.stutterheim@cloudnation.nl", "VU", "wageGap").
-+relation-allows-archetype("jorrit.stutterheim@cloudnation.nl", "VU", "computeToData").
-+relation-allows-archetype("jorrit.stutterheim@cloudnation.nl", "VU", "dataThroughTtp").
-+relation-allows-compute-provider("jorrit.stutterheim@cloudnation.nl", "VU", "SURF").
+// ── Relation: Jorrit ────────────────────────────
++has-relation("Jorrit", "VU").
++relation-allows-request-type("Jorrit", "VU", "sqlDataRequest").
++relation-allows-request-type("Jorrit", "VU", "genericRequest").
++relation-allows-dataset("Jorrit", "VU", "wageGap").
++relation-allows-archetype("Jorrit", "VU", "computeToData").
++relation-allows-archetype("Jorrit", "VU", "dataThroughTtp").
++relation-allows-compute-provider("Jorrit", "VU", "SURF").

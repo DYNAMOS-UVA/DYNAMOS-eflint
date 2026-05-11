@@ -227,11 +227,10 @@ func buildLayer3Phrases(requesterLit string, stewards []string) string {
 	return b.String()
 }
 
-// quoteEflintLiteral wraps a value as an eFLINT string literal so that values
-// containing characters outside [A-Za-z0-9_-] (e.g. email addresses) are
-// accepted. The same convention is used by the legacy translator and by the
-// configuration/eflint-models layered files, so identifiers match across all
-// three layers.
+// quoteEflintLiteral wraps a value as an eFLINT string literal. eFLINT requires
+// all fact instance values to be quoted strings — bare atoms are not supported.
+// Values containing special characters (e.g. backslashes or double-quotes) are
+// escaped so they round-trip correctly through the eFLINT JSON protocol.
 func quoteEflintLiteral(value string) string {
 	escaped := strings.ReplaceAll(value, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)

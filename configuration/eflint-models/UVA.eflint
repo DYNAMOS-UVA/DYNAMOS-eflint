@@ -32,11 +32,11 @@
 // Compute providers accepted by UVA.
 +steward-supports-compute-provider("UVA", "SURF").
 
-// ── Relation: jorrit.stutterheim@cloudnation.nl ────────────────────────────
-+has-relation("jorrit.stutterheim@cloudnation.nl", "UVA").
-+relation-allows-request-type("jorrit.stutterheim@cloudnation.nl", "UVA", "sqlDataRequest").
-+relation-allows-request-type("jorrit.stutterheim@cloudnation.nl", "UVA", "genericRequest").
-+relation-allows-dataset("jorrit.stutterheim@cloudnation.nl", "UVA", "wageGap").
-+relation-allows-archetype("jorrit.stutterheim@cloudnation.nl", "UVA", "computeToData").
-+relation-allows-archetype("jorrit.stutterheim@cloudnation.nl", "UVA", "dataThroughTtp").
-+relation-allows-compute-provider("jorrit.stutterheim@cloudnation.nl", "UVA", "SURF").
+// ── Relation: Jorrit ────────────────────────────
++has-relation("Jorrit", "UVA").
++relation-allows-request-type("Jorrit", "UVA", "sqlDataRequest").
++relation-allows-request-type("Jorrit", "UVA", "genericRequest").
++relation-allows-dataset("Jorrit", "UVA", "wageGap").
++relation-allows-archetype("Jorrit", "UVA", "computeToData").
++relation-allows-archetype("Jorrit", "UVA", "dataThroughTtp").
++relation-allows-compute-provider("Jorrit", "UVA", "SURF").

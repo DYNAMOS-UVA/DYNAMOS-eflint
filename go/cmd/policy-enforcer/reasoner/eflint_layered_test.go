@@ -8,10 +8,10 @@ import (
 
 func TestQuoteEflintLiteral(t *testing.T) {
 	cases := map[string]string{
-		`Niels`:                                 `"Niels"`,
-		`jorrit.stutterheim@cloudnation.nl`:     `"jorrit.stutterheim@cloudnation.nl"`,
-		`a"b`:                                   `"a\"b"`,
-		`a\b`:                                   `"a\\b"`,
+		`Niels`: `"Niels"`,
+		`Jorrit`: `"Jorrit"`,
+		`a"b`:  `"a\"b"`,
+		`a\b`:  `"a\\b"`,
 	}
 	for in, want := range cases {
 		if got := quoteEflintLiteral(in); got != want {
