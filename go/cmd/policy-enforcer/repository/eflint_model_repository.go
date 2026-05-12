@@ -41,7 +41,7 @@ func NewEtcdEflintModelRepository(client *clientv3.Client) *EtcdEflintModelRepos
 // The specification is stored at /policyEnforcer/eflintModels/{modelName} by the orchestrator.
 func (r *EtcdEflintModelRepository) GetEflintModel(modelName string) (string, bool, error) {
 	key := eflintModelKeyPrefix + modelName
-	output, err := etcd.GetValueFromEtcd(r.client, key)
+	output, err := etcd.GetValueFromEtcd(r.client, key, etcd.WithStopOnMissing())
 	if err != nil {
 		var notFound *etcd.ErrKeyNotFound
 		if errors.As(err, &notFound) {

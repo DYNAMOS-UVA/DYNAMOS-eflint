@@ -2,6 +2,7 @@ package repository
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
@@ -34,8 +35,12 @@ func NewEtcdProviderConfigRepository(client *clientv3.Client) *EtcdProviderConfi
 // GetProviderConfig retrieves the validation configuration for a specific provider from etcd.
 func (r *EtcdProviderConfigRepository) GetProviderConfig(provider string) (*api.ProviderValidationConfig, bool, error) {
 	key := providerConfigKeyPrefix + provider
-	output, err := etcd.GetValueFromEtcd(r.client, key)
+	output, err := etcd.GetValueFromEtcd(r.client, key, etcd.WithStopOnMissing())
 	if err != nil {
+		var notFound *etcd.ErrKeyNotFound
+		if errors.As(err, &notFound) {
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("error retrieving provider config from etcd for provider %s: %w", provider, err)
 	}
 

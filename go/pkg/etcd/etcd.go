@@ -13,6 +13,7 @@ type RetryOptions struct {
 	MaxInterval     time.Duration
 	MaxElapsedTime  time.Duration
 	AddJsonTrace    bool
+	StopOnMissing   bool
 }
 
 // DefaultRetryOptions provides a RetryOptions with default values.
@@ -52,6 +53,13 @@ func WithMaxInterval(d time.Duration) Option {
 func WithMaxElapsedTime(d time.Duration) Option {
 	return func(opts *RetryOptions) {
 		opts.MaxElapsedTime = d
+	}
+}
+
+// WithStopOnMissing stops retries if the key is not found, returning ErrKeyNotFound immediately.
+func WithStopOnMissing() Option {
+	return func(opts *RetryOptions) {
+		opts.StopOnMissing = true
 	}
 }
 

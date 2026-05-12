@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,8 +29,12 @@ func NewEtcdAgreementRepository(client *clientv3.Client) *EtcdAgreementRepositor
 // GetAgreement retrieves an agreement for a specific data steward from etcd.
 func (r *EtcdAgreementRepository) GetAgreement(steward string) (*api.Agreement, bool, error) {
 	key := agreementKeyPrefix + steward
-	output, err := etcd.GetValueFromEtcd(r.client, key)
+	output, err := etcd.GetValueFromEtcd(r.client, key, etcd.WithStopOnMissing())
 	if err != nil {
+		var notFound *etcd.ErrKeyNotFound
+		if errors.As(err, &notFound) {
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("error retrieving agreement from etcd for steward %s: %w", steward, err)
 	}
 

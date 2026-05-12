@@ -41,7 +41,7 @@ func NewEtcdEflintRulesRepository(client *clientv3.Client) *EtcdEflintRulesRepos
 
 // GetSharedAgreementRules retrieves the Layer-2 shared rules from etcd.
 func (r *EtcdEflintRulesRepository) GetSharedAgreementRules() (string, bool, error) {
-	output, err := etcd.GetValueFromEtcd(r.client, sharedRulesKey)
+	output, err := etcd.GetValueFromEtcd(r.client, sharedRulesKey, etcd.WithStopOnMissing())
 	if err != nil {
 		var notFound *etcd.ErrKeyNotFound
 		if errors.As(err, &notFound) {
