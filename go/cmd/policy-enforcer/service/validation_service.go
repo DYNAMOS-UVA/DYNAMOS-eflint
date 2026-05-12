@@ -85,8 +85,10 @@ func (s *ValidationService) ValidateRequest(ctx context.Context, request *pb.Req
 	}
 
 	// Phase 3: run a single layered evaluation across all requested stewards.
+	var eval *reasoner.RequestApprovalResult
 	if len(stewardPhrases) > 0 {
-		eval, err := s.reasoner.EvaluateRequestApproval(ctx, reasoner.RequestApprovalParams{
+		var err error
+		eval, err = s.reasoner.EvaluateRequestApproval(ctx, reasoner.RequestApprovalParams{
 			Requester:      request.User.UserName,
 			Stewards:       request.DataProviders,
 			SharedRules:    sharedRules,
@@ -102,7 +104,7 @@ func (s *ValidationService) ValidateRequest(ctx context.Context, request *pb.Req
 		s.applyEvaluation(eval, request, response)
 	}
 
-	response.RequestApproved = len(response.ValidDataproviders) > 0
+	response.RequestApproved = eval != nil && eval.PermittedRequest
 	if response.RequestApproved {
 		response.Auth = s.authGenerator.GenerateToken()
 	}
