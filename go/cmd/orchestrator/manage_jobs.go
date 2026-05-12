@@ -73,36 +73,21 @@ func checkJobs(agreementName string) {
 		logger.Sugar().Warnf("error get jobs: %v", err)
 	}
 
-	userNames := make(map[string]bool)
+	userJobs := make(map[string][]string)
 	for _, k := range jobKeys {
 		parts := strings.Split(k, "/")
 		if len(parts) >= 6 {
 			userName := parts[4]
-			userNames[userName] = true
+			jobName := parts[5]
+			userJobs[userName] = append(userJobs[userName], jobName)
 		}
 	}
 
-	for userName := range userNames {
-		userKey := fmt.Sprintf("/agents/jobs/%s/%s", agreementName, userName)
-		jobNamesFull, err := etcd.GetKeysFromPrefix(etcdClient, userKey, etcd.WithMaxElapsedTime(2*time.Second))
-		if err != nil {
-			logger.Sugar().Warnf("error get jobs: %v", err)
-			continue
-		}
-
-		var jobNames []string
-		for _, k := range jobNamesFull {
-			parts := strings.Split(k, "/")
-			if len(parts) >= 6 {
-				jobNames = append(jobNames, parts[5])
-			}
-		}
-
+	for userName, jobNames := range userJobs {
 		if len(jobNames) == 0 {
 			logger.Debug("no active jobs for this user")
 			continue
 		}
-
 		evaluateArchetypeInActiveJobs(jobNames, agreementName, userName, c)
 	}
 }
