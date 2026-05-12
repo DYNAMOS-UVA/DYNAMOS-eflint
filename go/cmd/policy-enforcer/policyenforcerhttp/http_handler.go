@@ -5,17 +5,17 @@
 // Both endpoints share the same code path the request-approval flow uses, so
 // they exercise the production layered eFLINT pipeline:
 //
-//   GET  /policy-enforcer/allowed-clauses?steward=...[&requester=...]
-//        → Loads Layer 1 + Layer 2 (shared + per-steward) onto a clean pool
-//          instance and returns the steward-supports-* and relation-allows-*
-//          facts for the steward (optionally narrowed to one requester).
+//	GET  /policy-enforcer/allowed-clauses?steward=...[&requester=...]
+//	     → Loads Layer 1 + Layer 2 (shared + per-steward) onto a clean pool
+//	       instance and returns the steward-supports-* and relation-allows-*
+//	       facts for the steward (optionally narrowed to one requester).
 //
-//   POST /policy-enforcer/validate
-//        → Body matches the relevant fields of pb.RequestApproval (user +
-//          data_providers). Runs ValidationService.ValidateRequest and
-//          returns the resulting pb.ValidationResponse. The pool restarts the
-//          eFLINT process when the entry is released, so the simulated
-//          submit-data-request acts have no persistent side effects.
+//	POST /policy-enforcer/validate
+//	     → Body matches the relevant fields of pb.RequestApproval (user +
+//	       data_providers). Runs ValidationService.ValidateRequest and
+//	       returns the resulting pb.ValidationResponse. The pool restarts the
+//	       eFLINT process when the entry is released, so the simulated
+//	       submit-data-request acts have no persistent side effects.
 package policyenforcerhttp
 
 import (
@@ -89,6 +89,110 @@ type ValidateRequestBody struct {
 	Options       map[string]bool `json:"options,omitempty"`
 }
 
+// validationResponseDTO is a custom JSON representation of pb.ValidationResponse.
+// Protobuf-generated structs tag every field with omitempty, which drops zero
+// values such as request_approved=false and empty maps. This DTO controls the
+// serialisation explicitly so all semantically meaningful fields are always
+// present in the response body.
+type validationResponseDTO struct {
+	Type                 string                      `json:"type"`
+	RequestType          string                      `json:"request_type"`
+	ValidDataproviders   map[string]*dataProviderDTO `json:"valid_dataproviders"`
+	InvalidDataproviders []string                    `json:"invalid_dataproviders"`
+	Auth                 *authDTO                    `json:"auth,omitempty"`
+	User                 *userDTO                    `json:"user,omitempty"`
+	RequestApproved      bool                        `json:"request_approved"`
+	ValidArchetypes      *userArchetypesDTO          `json:"valid_archetypes,omitempty"`
+}
+
+type dataProviderDTO struct {
+	Archetypes       []string `json:"archetypes"`
+	ComputeProviders []string `json:"compute_providers"`
+}
+
+type authDTO struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type userDTO struct {
+	ID       string `json:"id"`
+	UserName string `json:"user_name"`
+}
+
+type userArchetypesDTO struct {
+	UserName   string                           `json:"user_name"`
+	Archetypes map[string]*allowedArchetypesDTO `json:"archetypes,omitempty"`
+}
+
+type allowedArchetypesDTO struct {
+	Archetypes []string `json:"archetypes"`
+}
+
+// toValidationResponseDTO maps a pb.ValidationResponse to a validationResponseDTO
+// so that zero-value fields (false bool, empty map) are preserved in JSON output.
+func toValidationResponseDTO(r *pb.ValidationResponse) validationResponseDTO {
+	dto := validationResponseDTO{
+		Type:                 r.Type,
+		RequestType:          r.RequestType,
+		ValidDataproviders:   make(map[string]*dataProviderDTO),
+		InvalidDataproviders: r.InvalidDataproviders,
+		RequestApproved:      r.RequestApproved,
+	}
+
+	if dto.InvalidDataproviders == nil {
+		dto.InvalidDataproviders = []string{}
+	}
+
+	for k, v := range r.ValidDataproviders {
+		dp := &dataProviderDTO{
+			Archetypes:       v.Archetypes,
+			ComputeProviders: v.ComputeProviders,
+		}
+		if dp.Archetypes == nil {
+			dp.Archetypes = []string{}
+		}
+		if dp.ComputeProviders == nil {
+			dp.ComputeProviders = []string{}
+		}
+		dto.ValidDataproviders[k] = dp
+	}
+
+	if r.Auth != nil {
+		dto.Auth = &authDTO{
+			AccessToken:  r.Auth.AccessToken,
+			RefreshToken: r.Auth.RefreshToken,
+		}
+	}
+
+	if r.User != nil {
+		dto.User = &userDTO{
+			ID:       r.User.Id,
+			UserName: r.User.UserName,
+		}
+	}
+
+	if r.ValidArchetypes != nil {
+		archetypes := &userArchetypesDTO{
+			UserName:   r.ValidArchetypes.UserName,
+			Archetypes: make(map[string]*allowedArchetypesDTO),
+		}
+		for k, v := range r.ValidArchetypes.Archetypes {
+			aa := &allowedArchetypesDTO{Archetypes: v.Archetypes}
+			if aa.Archetypes == nil {
+				aa.Archetypes = []string{}
+			}
+			archetypes.Archetypes[k] = aa
+		}
+		if len(archetypes.Archetypes) == 0 {
+			archetypes.Archetypes = nil
+		}
+		dto.ValidArchetypes = archetypes
+	}
+
+	return dto
+}
+
 // ValidateRequest handles
 //
 //	POST /policy-enforcer/validate
@@ -128,5 +232,5 @@ func (h *HTTPHandler) ValidateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.validationService.ValidateRequest(r.Context(), req)
-	httpapi.WriteJSON(w, http.StatusOK, resp)
+	httpapi.WriteJSON(w, http.StatusOK, toValidationResponseDTO(resp))
 }
