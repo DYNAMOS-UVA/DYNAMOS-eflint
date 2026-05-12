@@ -113,6 +113,12 @@ func handlePutAgreement(w http.ResponseWriter, r *http.Request) {
 	agreementUpdateMap[correlationId] = resChan
 	agreementUpdateMutex.Unlock()
 
+	defer func() {
+		agreementUpdateMutex.Lock()
+		delete(agreementUpdateMap, correlationId)
+		agreementUpdateMutex.Unlock()
+	}()
+
 	c.SendPolicyUpdate(r.Context(), policyUpdate)
 
 	select {
@@ -125,9 +131,6 @@ func handlePutAgreement(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	case <-time.After(30 * time.Second):
-		agreementUpdateMutex.Lock()
-		delete(agreementUpdateMap, correlationId)
-		agreementUpdateMutex.Unlock()
 		http.Error(w, "Timeout waiting for Policy Enforcer validation", http.StatusGatewayTimeout)
 	}
 }
