@@ -1,9 +1,11 @@
 package repository
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/etcd"
@@ -18,6 +20,11 @@ type ProviderConfigRepository interface {
 	// GetProviderConfig retrieves the validation configuration for a specific data provider.
 	// Returns the config and a boolean indicating if the config was found.
 	GetProviderConfig(provider string) (*api.ProviderValidationConfig, bool, error)
+
+	// SaveProviderConfig writes the validation configuration for the provider.
+	// Used when reconciling a format switch so subsequent evaluations resolve
+	// the correct AgreementPhraseProvider.
+	SaveProviderConfig(provider string, config *api.ProviderValidationConfig) error
 }
 
 // EtcdProviderConfigRepository implements ProviderConfigRepository using etcd as the backend.
@@ -54,4 +61,22 @@ func (r *EtcdProviderConfigRepository) GetProviderConfig(provider string) (*api.
 	}
 
 	return &config, true, nil
+}
+
+// SaveProviderConfig persists the provider's validation configuration to etcd.
+func (r *EtcdProviderConfigRepository) SaveProviderConfig(provider string, config *api.ProviderValidationConfig) error {
+	if config == nil {
+		return fmt.Errorf("provider config is nil")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := providerConfigKeyPrefix + provider
+	jsonBytes, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal provider config for %s: %w", provider, err)
+	}
+	if _, err := r.client.Put(ctx, key, string(jsonBytes)); err != nil {
+		return fmt.Errorf("error saving provider config to etcd for %s: %w", provider, err)
+	}
+	return nil
 }

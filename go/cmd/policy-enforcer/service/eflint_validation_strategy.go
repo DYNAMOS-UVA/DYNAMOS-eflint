@@ -14,22 +14,28 @@ import (
 // /policyEnforcer/eflintModels/{steward}.
 //
 // GetLayer2Phrases simply returns the stored eFLINT text; ValidateAndPersist
-// asks the reasoner to validate the syntax (by sending the phrases to a pool
-// instance) and then stores them.
+// loads the Layer-2 shared rules first so fact types like `agreement` and
+// `steward-supports-archetype` are in scope, then asks the reasoner to
+// validate the steward's phrases before storing them.
 type EflintAgreementPhraseProvider struct {
 	modelRepo repository.EflintModelRepository
+	rulesRepo repository.EflintRulesRepository
 	reasoner  reasoner.Reasoner
 	logger    *zap.Logger
 }
 
 // NewEflintAgreementPhraseProvider creates a new eFLINT phrase provider.
+// rulesRepo is used to load the Layer-2 shared rules before validation so
+// that steward phrases can reference fact types declared in those rules.
 func NewEflintAgreementPhraseProvider(
 	modelRepo repository.EflintModelRepository,
+	rulesRepo repository.EflintRulesRepository,
 	r reasoner.Reasoner,
 	logger *zap.Logger,
 ) *EflintAgreementPhraseProvider {
 	return &EflintAgreementPhraseProvider{
 		modelRepo: modelRepo,
+		rulesRepo: rulesRepo,
 		reasoner:  r,
 		logger:    logger,
 	}
@@ -53,8 +59,22 @@ func (p *EflintAgreementPhraseProvider) GetLayer2Phrases(steward string) (string
 	return text, found, nil
 }
 
-// ValidateAndPersist asks the reasoner to validate the eFLINT phrases and
-// then saves them to etcd.
+// ValidateAndPersist loads the Layer-2 shared rules (so the steward's phrase
+// references to `agreement`, `steward-supports-archetype`, etc. resolve),
+// then asks the reasoner to validate the steward's phrases and save them.
 func (p *EflintAgreementPhraseProvider) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
-	return p.reasoner.ValidateAndPersistModel(ctx, steward, string(payload))
+	sharedRules := ""
+	if p.rulesRepo != nil {
+		text, found, err := p.rulesRepo.GetSharedAgreementRules()
+		if err != nil {
+			p.logger.Warn("could not load shared rules for model validation; proceeding without them",
+				zap.String("steward", steward),
+				zap.Error(err),
+			)
+		} else if found {
+			sharedRules = text
+		}
+	}
+
+	return p.reasoner.ValidateAndPersistModel(ctx, steward, sharedRules, string(payload))
 }

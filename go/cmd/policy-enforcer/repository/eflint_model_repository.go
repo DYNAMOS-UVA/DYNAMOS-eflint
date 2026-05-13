@@ -23,6 +23,11 @@ type EflintModelRepository interface {
 
 	// SaveEflintModel saves the raw eFLINT specification text for a provider.
 	SaveEflintModel(modelName string, modelText string) error
+
+	// DeleteEflintModel removes the eFLINT model for the provider from etcd.
+	// Used when reconciling a format switch (legacy replaces eFLINT).
+	// Deleting a non-existent key is not an error.
+	DeleteEflintModel(modelName string) error
 }
 
 // EtcdEflintModelRepository implements EflintModelRepository using etcd as the backend.
@@ -64,4 +69,17 @@ func (r *EtcdEflintModelRepository) SaveEflintModel(modelName string, modelText 
 	key := eflintModelKeyPrefix + modelName
 	_, err := r.client.Put(ctx, key, modelText)
 	return err
+}
+
+// DeleteEflintModel removes the eFLINT model for the provider from etcd.
+// Deleting an absent key is a no-op (no error).
+func (r *EtcdEflintModelRepository) DeleteEflintModel(modelName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := eflintModelKeyPrefix + modelName
+	_, err := r.client.Delete(ctx, key)
+	if err != nil {
+		return fmt.Errorf("error deleting eFLINT model from etcd for %s: %w", modelName, err)
+	}
+	return nil
 }

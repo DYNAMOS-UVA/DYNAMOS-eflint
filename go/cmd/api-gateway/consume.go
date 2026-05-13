@@ -29,6 +29,11 @@ func handleIncomingMessages(ctx context.Context, grpcMsg *pb.SideCarMessage) err
 			logger.Sugar().Fatalf("Failed to unmarshal message: %v", err)
 		}
 		requestApprovalMutex.Lock()
+		if requestApprovalResponse.User == nil {
+			logger.Sugar().Error("requestApprovalResponse has no User; cannot route response")
+			requestApprovalMutex.Unlock()
+			return fmt.Errorf("requestApprovalResponse missing User field")
+		}
 		// Look up the corresponding channel in the request map
 		approvalRequest, ok := requestApprovalMap[requestApprovalResponse.User.Id]
 		if ok {

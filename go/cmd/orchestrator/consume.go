@@ -44,19 +44,21 @@ func handleIncomingMessages(ctx context.Context, grpcMsg *pb.SideCarMessage) err
 		}
 		policyUpdateMutex.Unlock()
 
-	case "agreementUpdate":
-		agreementUpdate := &pb.PolicyUpdate{}
-		if err := grpcMsg.Body.UnmarshalTo(agreementUpdate); err != nil {
-			logger.Sugar().Errorf("Failed to unmarshal agreementUpdate: %v", err)
+	case "agreementUpdate", "sharedRulesUpdate":
+		// Both agreementUpdate and sharedRulesUpdate acks are routed back via
+		// awaitPolicyEnforcerAck's agreementUpdateMap, keyed by correlation ID.
+		ack := &pb.PolicyUpdate{}
+		if err := grpcMsg.Body.UnmarshalTo(ack); err != nil {
+			logger.Sugar().Errorf("Failed to unmarshal %s ack: %v", grpcMsg.Type, err)
 			return err
 		}
 		agreementUpdateMutex.Lock()
-		resChan, ok := agreementUpdateMap[agreementUpdate.RequestMetadata.CorrelationId]
+		resChan, ok := agreementUpdateMap[ack.RequestMetadata.CorrelationId]
 		if ok {
-			delete(agreementUpdateMap, agreementUpdate.RequestMetadata.CorrelationId)
-			resChan <- agreementUpdate
+			delete(agreementUpdateMap, ack.RequestMetadata.CorrelationId)
+			resChan <- ack
 		} else {
-			logger.Sugar().Warn("no pending agreement update found for this correlation ID")
+			logger.Sugar().Warnf("no pending %s found for correlation ID %s", grpcMsg.Type, ack.RequestMetadata.CorrelationId)
 		}
 		agreementUpdateMutex.Unlock()
 

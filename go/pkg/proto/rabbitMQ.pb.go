@@ -904,6 +904,7 @@ type PolicyUpdate struct {
 	ValidationResponse *ValidationResponse    `protobuf:"bytes,5,opt,name=validation_response,json=validationResponse,proto3" json:"validation_response,omitempty"`
 	AgreementPayload   []byte                 `protobuf:"bytes,6,opt,name=agreement_payload,json=agreementPayload,proto3" json:"agreement_payload,omitempty"`
 	AgreementName      string                 `protobuf:"bytes,7,opt,name=agreement_name,json=agreementName,proto3" json:"agreement_name,omitempty"`
+	Format             string                 `protobuf:"bytes,8,opt,name=format,proto3" json:"format,omitempty"` // "json" | "eflint"; empty for sharedRulesUpdate
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -983,6 +984,13 @@ func (x *PolicyUpdate) GetAgreementPayload() []byte {
 func (x *PolicyUpdate) GetAgreementName() string {
 	if x != nil {
 		return x.AgreementName
+	}
+	return ""
+}
+
+func (x *PolicyUpdate) GetFormat() string {
+	if x != nil {
+		return x.Format
 	}
 	return ""
 }
@@ -1272,7 +1280,7 @@ const file_rabbitMQ_proto_rawDesc = "" +
 	"\x10request_metadata\x18\a \x01(\v2\x18.dynamos.RequestMetadataR\x0frequestMetadata\x1aF\n" +
 	"\x18AuthorizedProvidersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xeb\x02\n" +
 	"\fPolicyUpdate\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12!\n" +
 	"\x04user\x18\x02 \x01(\v2\r.dynamos.UserR\x04user\x12%\n" +
@@ -1280,7 +1288,8 @@ const file_rabbitMQ_proto_rawDesc = "" +
 	"\x10request_metadata\x18\x04 \x01(\v2\x18.dynamos.RequestMetadataR\x0frequestMetadata\x12L\n" +
 	"\x13validation_response\x18\x05 \x01(\v2\x1b.dynamos.ValidationResponseR\x12validationResponse\x12+\n" +
 	"\x11agreement_payload\x18\x06 \x01(\fR\x10agreementPayload\x12%\n" +
-	"\x0eagreement_name\x18\a \x01(\tR\ragreementName\"\xa6\x02\n" +
+	"\x0eagreement_name\x18\a \x01(\tR\ragreementName\x12\x16\n" +
+	"\x06format\x18\b \x01(\tR\x06format\"\xa6\x02\n" +
 	"\x12CompositionRequest\x12!\n" +
 	"\farchetype_id\x18\x01 \x01(\tR\varchetypeId\x12!\n" +
 	"\frequest_type\x18\x02 \x01(\tR\vrequestType\x12\x12\n" +

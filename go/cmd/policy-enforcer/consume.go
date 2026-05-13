@@ -18,6 +18,8 @@ func (app *Application) handleIncomingMessages(ctx context.Context, grpcMsg *pb.
 		return app.handlePolicyUpdate(ctx, grpcMsg)
 	case "agreementUpdate":
 		return app.handleAgreementUpdate(ctx, grpcMsg)
+	case "sharedRulesUpdate":
+		return app.handleSharedRulesUpdate(ctx, grpcMsg)
 	default:
 		app.logger.Error("Unknown message type", zap.String("type", grpcMsg.Type))
 		return fmt.Errorf("unknown message type: %s", grpcMsg.Type)
@@ -40,12 +42,16 @@ func (app *Application) handleAgreementUpdate(ctx context.Context, grpcMsg *pb.S
 
 	app.logger.Info("Processing agreement update",
 		zap.String("agreementName", agreementUpdate.AgreementName),
+		zap.String("format", agreementUpdate.Format),
 	)
 
-	// Validate & Persist
-	err = app.validationService.ValidateAndPersistAgreement(ctx, agreementUpdate.AgreementName, agreementUpdate.AgreementPayload)
+	err = app.validationService.ValidateAndPersistAgreement(
+		ctx,
+		agreementUpdate.AgreementName,
+		agreementUpdate.Format,
+		agreementUpdate.AgreementPayload,
+	)
 
-	// Set response properties
 	if agreementUpdate.ValidationResponse == nil {
 		agreementUpdate.ValidationResponse = &pb.ValidationResponse{}
 	}
@@ -62,6 +68,50 @@ func (app *Application) handleAgreementUpdate(ctx context.Context, grpcMsg *pb.S
 	if err := app.responseSender.SendPolicyUpdate(ctx, &agreementUpdate); err != nil {
 		app.logger.Error("Failed to send agreement update response", zap.Error(err))
 		return fmt.Errorf("failed to send agreement update response: %w", err)
+	}
+
+	return nil
+}
+
+// handleSharedRulesUpdate validates and persists the Layer-2 shared agreement
+// rules. The orchestrator triggers re-evaluation of every running job on the
+// approval ack since shared rules affect derivations for all stewards.
+func (app *Application) handleSharedRulesUpdate(ctx context.Context, grpcMsg *pb.SideCarMessage) error {
+	ctx, span, err := lib.StartRemoteParentSpan(ctx, serviceName+"/func: handleSharedRulesUpdate", grpcMsg.Traces)
+	if err != nil {
+		app.logger.Error("Error starting trace", zap.Error(err))
+	}
+	defer span.End()
+
+	var sharedRulesUpdate pb.PolicyUpdate
+	if err := grpcMsg.Body.UnmarshalTo(&sharedRulesUpdate); err != nil {
+		app.logger.Error("Failed to unmarshal shared rules update", zap.Error(err))
+		return fmt.Errorf("failed to unmarshal shared rules update: %w", err)
+	}
+
+	app.logger.Info("Processing shared rules update")
+
+	err = app.validationService.ValidateAndPersistSharedRules(ctx, sharedRulesUpdate.AgreementPayload)
+
+	if sharedRulesUpdate.ValidationResponse == nil {
+		sharedRulesUpdate.ValidationResponse = &pb.ValidationResponse{}
+	}
+
+	if err != nil {
+		app.logger.Error("Shared rules validation failed", zap.Error(err))
+		sharedRulesUpdate.ValidationResponse.RequestApproved = false
+	} else {
+		sharedRulesUpdate.ValidationResponse.RequestApproved = true
+	}
+
+	if sharedRulesUpdate.RequestMetadata == nil {
+		sharedRulesUpdate.RequestMetadata = &pb.RequestMetadata{}
+	}
+	sharedRulesUpdate.RequestMetadata.DestinationQueue = "orchestrator-in"
+
+	if err := app.responseSender.SendPolicyUpdate(ctx, &sharedRulesUpdate); err != nil {
+		app.logger.Error("Failed to send shared rules update response", zap.Error(err))
+		return fmt.Errorf("failed to send shared rules update response: %w", err)
 	}
 
 	return nil
@@ -110,6 +160,11 @@ func (app *Application) handlePolicyUpdate(ctx context.Context, grpcMsg *pb.Side
 	if err := grpcMsg.Body.UnmarshalTo(&policyUpdate); err != nil {
 		app.logger.Error("Failed to unmarshal policy update", zap.Error(err))
 		return fmt.Errorf("failed to unmarshal policy update: %w", err)
+	}
+
+	if policyUpdate.User == nil {
+		app.logger.Error("Received policyUpdate with nil User; message likely mis-routed", zap.String("type", policyUpdate.Type))
+		return fmt.Errorf("policyUpdate message has no User field (type=%s)", policyUpdate.Type)
 	}
 
 	app.logger.Info("Processing policy update",

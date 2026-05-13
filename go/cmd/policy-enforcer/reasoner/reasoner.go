@@ -100,7 +100,19 @@ type Reasoner interface {
 	// ValidateAndPersistModel validates a raw policy text for the given
 	// steward by handing it to the reasoner backend and, if it parses,
 	// persisting it. Used by the policy-update HTTP/RabbitMQ paths.
-	ValidateAndPersistModel(ctx context.Context, organization string, modelText string) error
+	//
+	// sharedRulesText is the Layer-2 shared rules that must be loaded onto the
+	// eFLINT instance before the per-steward phrases are sent, because the
+	// steward phrases reference fact types declared in the shared rules
+	// (agreement, steward-supports-archetype, has-relation, etc.).
+	// Pass an empty string when no shared rules are available yet.
+	ValidateAndPersistModel(ctx context.Context, organization string, sharedRulesText string, modelText string) error
+
+	// ValidateSharedRules validates the Layer-2 shared rules eFLINT text by
+	// sending it to a clean pool instance on top of the Layer-1 baseline.
+	// The instance is restarted on release, so no state leaks; persistence
+	// is the caller's responsibility (see ValidationService).
+	ValidateSharedRules(ctx context.Context, rulesText string) error
 
 	// Name returns the name/type of this reasoner (e.g., "eflint").
 	Name() string

@@ -27,22 +27,26 @@ func (s Set) Has(v string) bool {
 	return ok
 }
 
-// Function expects a valid email address and the length of the desired GUID
-// Example:
+// GenerateJobName derives a deterministic-prefix job name from a username and a
+// random suffix of the given length. The username may be a full email address
+// (only the local part before '@' is used) or any plain string.
 //
-// fmt.Println(GenerateJobName("example.two@cloud.com", 8))
-// prints: example-two-12345678 (some GUID of length 8, prefixed with a hyphen)
-func GenerateJobName(email string, length int) string {
-	// Extract the part before '@' symbol
-	atIndex := strings.Index(email, "@")
-	if atIndex == -1 {
-		return ""
+// Examples:
+//
+//	GenerateJobName("example.two@cloud.com", 8) → "example-two-12345678"
+//	GenerateJobName("Jorrit", 8)                → "jorrit-12345678"
+func GenerateJobName(username string, length int) string {
+	// Use only the local part when the username is an email address.
+	prefix := username
+	if atIndex := strings.Index(username, "@"); atIndex != -1 {
+		prefix = username[:atIndex]
 	}
-	domain := email[:atIndex]
 
-	// Remove special characters and replace with hyphen
+	// Normalise: lowercase and replace every run of non-alphanumeric chars with a hyphen.
 	re := regexp.MustCompile(`[^a-zA-Z0-9]+`)
-	domain = re.ReplaceAllString(domain, "-")
+	prefix = strings.ToLower(re.ReplaceAllString(prefix, "-"))
+	// Trim any leading/trailing hyphens that may have been produced.
+	prefix = strings.Trim(prefix, "-")
 
 	// Generate a random GUID of the given length
 	guid := uuid.New().String()
@@ -50,8 +54,7 @@ func GenerateJobName(email string, length int) string {
 		guid = guid[:length]
 	}
 
-	// Construct the final email address
-	return fmt.Sprintf("%s-%s", domain, guid)
+	return fmt.Sprintf("%s-%s", prefix, guid)
 }
 
 func ReadFile(fileName string) (string, error) {

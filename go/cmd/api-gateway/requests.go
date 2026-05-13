@@ -14,8 +14,8 @@ import (
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.opencensus.io/trace/propagation"
 	"go.opencensus.io/trace"
+	"go.opencensus.io/trace/propagation"
 )
 
 func requestHandler() http.HandlerFunc {
@@ -91,6 +91,12 @@ func requestHandler() http.HandlerFunc {
 				return
 			}
 
+			if msg.Error != "" {
+				logger.Sugar().Warnf("Request approval denied: %s", msg.Error)
+				http.Error(w, msg.Error, http.StatusForbidden)
+				return
+			}
+
 			// Add necessary information for the data request in the request metadata
 			requestMetadata := &pb.RequestMetadata{
 				// Add the job id from the request approval to the data request body
@@ -102,6 +108,13 @@ func requestHandler() http.HandlerFunc {
 			requestMetadata.Traces["binaryTrace"] = propagation.Binary(span.SpanContext())
 			// Set the data request interface to the request metadata from the previous steps
 			dataRequestInterface["requestMetadata"] = requestMetadata
+
+			// only return the validation response for benchmarking purposes
+			// TODO: Remove this once the benchmarking is done
+			jsonResponse, err := json.Marshal(msg)
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonResponse)
+			return
 
 			// Marshal the combined data back into JSON for forwarding
 			dataRequestJson, err := json.Marshal(dataRequestInterface)

@@ -78,11 +78,14 @@ func NewApplication() (*Application, error) {
 }
 
 // initializeValidationService creates and configures the ValidationService
-// with the layered eFLINT design's per-format AgreementPhraseProviders and
-// the shared-rules repository.
+// with the layered eFLINT design's per-format AgreementPhraseProviders, the
+// shared-rules repository, and the per-format repositories used by the
+// format-switch reconciliation in ValidateAndPersistAgreement.
 func (app *Application) initializeValidationService(
 	providerConfigRepo repository.ProviderConfigRepository,
 	rulesRepo repository.EflintRulesRepository,
+	agreementRepo repository.AgreementRepository,
+	eflintModelRepo repository.EflintModelRepository,
 	legacyProvider service.AgreementPhraseProvider,
 	eflintProvider service.AgreementPhraseProvider,
 	r reasoner.Reasoner,
@@ -90,6 +93,8 @@ func (app *Application) initializeValidationService(
 	app.validationService = service.NewValidationServiceWithConfig(service.ValidationServiceConfig{
 		ProviderConfigRepo: providerConfigRepo,
 		RulesRepo:          rulesRepo,
+		AgreementRepo:      agreementRepo,
+		EflintModelRepo:    eflintModelRepo,
 		LegacyProvider:     legacyProvider,
 		EflintProvider:     eflintProvider,
 		Reasoner:           r,
@@ -138,8 +143,6 @@ func main() {
 	}
 	defer app.Close()
 
-	app.Run()
-
 	// Resolve the empty model path for bootstrapping pool instances
 	modelPath := resolveModelPath(app.logger, eflintModelPath)
 	if modelPath == "" {
@@ -181,11 +184,21 @@ func main() {
 	// AgreementPhraseProviders: one per agreement-storage format. Both feed
 	// the same canonical layered execution path through the reasoner.
 	legacyProvider := service.NewLegacyAgreementPhraseProvider(agreementRepo, app.logger)
-	eflintProvider := service.NewEflintAgreementPhraseProvider(eflintModelRepo, eflintReasoner, app.logger)
+	eflintProvider := service.NewEflintAgreementPhraseProvider(eflintModelRepo, rulesRepo, eflintReasoner, app.logger)
 
-	app.initializeValidationService(providerConfigRepo, rulesRepo, legacyProvider, eflintProvider, eflintReasoner)
+	app.initializeValidationService(
+		providerConfigRepo,
+		rulesRepo,
+		agreementRepo,
+		eflintModelRepo,
+		legacyProvider,
+		eflintProvider,
+		eflintReasoner,
+	)
 
 	app.logger.Info("ValidationService configured with layered eFLINT evaluation (legacy + eflint providers)")
+
+	app.Run()
 
 	// Create a single Manager for the eFLINT debug/management HTTP API endpoints
 	defaultManager := eflint.NewManager(managerConfig, app.logger)

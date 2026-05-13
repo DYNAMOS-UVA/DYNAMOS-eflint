@@ -62,3 +62,16 @@ func (r *EtcdAgreementRepository) SaveAgreement(steward string, agreement *api.A
 	_, err = r.client.Put(ctx, key, string(jsonBytes))
 	return err
 }
+
+// DeleteAgreement removes the legacy JSON agreement for the steward from etcd.
+// Deleting an absent key is a no-op (no error).
+func (r *EtcdAgreementRepository) DeleteAgreement(steward string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := agreementKeyPrefix + steward
+	_, err := r.client.Delete(ctx, key)
+	if err != nil {
+		return fmt.Errorf("error deleting agreement from etcd for steward %s: %w", steward, err)
+	}
+	return nil
+}

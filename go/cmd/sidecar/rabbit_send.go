@@ -184,6 +184,11 @@ func (s *serverInstance) SendCompositionRequest(ctx context.Context, in *pb.Comp
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
+	// if the destination queue is not set, return an error
+	if in.DestinationQueue == "" {
+		return nil, status.Error(codes.InvalidArgument, "destination queue is required")
+	}
+
 	// Do other stuff
 	message := amqp.Publishing{
 		Body: data,
@@ -224,14 +229,19 @@ func (s *serverInstance) SendPolicyUpdate(ctx context.Context, in *pb.PolicyUpda
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	// Do other stuff
+	// Use in.Type as the AMQP message type so consumers can distinguish
+	// between "policyUpdate", "agreementUpdate", and "sharedRulesUpdate".
+	msgType := in.Type
+	if msgType == "" {
+		msgType = "policyUpdate"
+	}
 	message := amqp.Publishing{
 		CorrelationId: in.RequestMetadata.CorrelationId,
 		Body:          data,
-		Type:          "policyUpdate",
+		Type:          msgType,
 	}
 
-	logger.Sugar().Debugf("PolicyUpdate destination queue: %s", in.RequestMetadata.DestinationQueue)
+	logger.Sugar().Debugf("PolicyUpdate destination queue: %s (type: %s)", in.RequestMetadata.DestinationQueue, msgType)
 	go send(ctx, message, in.RequestMetadata.DestinationQueue, s, etcd.WithMaxElapsedTime(10*time.Second))
 	return &emptypb.Empty{}, nil
 

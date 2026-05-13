@@ -24,6 +24,8 @@ import (
 type ValidationService struct {
 	providerConfigRepo repository.ProviderConfigRepository
 	rulesRepo          repository.EflintRulesRepository
+	agreementRepo      repository.AgreementRepository
+	eflintModelRepo    repository.EflintModelRepository
 	legacyProvider     AgreementPhraseProvider
 	eflintProvider     AgreementPhraseProvider // optional: nil if eFLINT-format provider not configured
 
@@ -36,11 +38,17 @@ type ValidationService struct {
 type ValidationServiceConfig struct {
 	ProviderConfigRepo repository.ProviderConfigRepository
 	RulesRepo          repository.EflintRulesRepository
-	LegacyProvider     AgreementPhraseProvider
-	EflintProvider     AgreementPhraseProvider // optional
-	Reasoner           reasoner.Reasoner
-	AuthGenerator      AuthTokenGenerator
-	Logger             *zap.Logger
+	// AgreementRepo and EflintModelRepo are used by the format-switch
+	// reconciliation in ValidateAndPersistAgreement to delete the now-stale
+	// representation of a steward's policy. They are optional: if nil,
+	// the old-key cleanup step is skipped.
+	AgreementRepo   repository.AgreementRepository
+	EflintModelRepo repository.EflintModelRepository
+	LegacyProvider  AgreementPhraseProvider
+	EflintProvider  AgreementPhraseProvider // optional
+	Reasoner        reasoner.Reasoner
+	AuthGenerator   AuthTokenGenerator
+	Logger          *zap.Logger
 }
 
 // NewValidationServiceWithConfig creates a ValidationService with the given configuration.
@@ -48,6 +56,8 @@ func NewValidationServiceWithConfig(cfg ValidationServiceConfig) *ValidationServ
 	return &ValidationService{
 		providerConfigRepo: cfg.ProviderConfigRepo,
 		rulesRepo:          cfg.RulesRepo,
+		agreementRepo:      cfg.AgreementRepo,
+		eflintModelRepo:    cfg.EflintModelRepo,
 		legacyProvider:     cfg.LegacyProvider,
 		eflintProvider:     cfg.EflintProvider,
 		reasoner:           cfg.Reasoner,
@@ -272,15 +282,162 @@ func (s *ValidationService) markAllInvalid(dataProviders []string, response *pb.
 	}
 }
 
-// ValidateAndPersistAgreement resolves the steward's provider and delegates
-// validation + persistence to it.
-func (s *ValidationService) ValidateAndPersistAgreement(ctx context.Context, steward string, payload []byte) error {
-	provider := s.resolveProvider(steward)
+// ValidateAndPersistAgreement validates and stores a steward's agreement in
+// the requested format ("json" → legacy provider, "eflint" → eFLINT provider).
+// On a successful save it reconciles /policyEnforcer/configs/{steward} so the
+// steward's ValidationStrategy matches the new format and deletes the now-
+// obsolete representation under the alternate etcd prefix.
+func (s *ValidationService) ValidateAndPersistAgreement(ctx context.Context, steward, format string, payload []byte) error {
+	provider, strategy, err := s.providerForFormat(format)
+	if err != nil {
+		return err
+	}
+
 	s.logger.Info("Validating and persisting agreement",
 		zap.String("steward", steward),
 		zap.String("provider", provider.Name()),
+		zap.String("format", format),
 	)
-	return provider.ValidateAndPersist(ctx, steward, payload)
+
+	if err := provider.ValidateAndPersist(ctx, steward, payload); err != nil {
+		return err
+	}
+
+	s.reconcileProviderConfig(steward, strategy)
+	return nil
+}
+
+// providerForFormat picks the AgreementPhraseProvider that matches the input
+// format. Format values come from the orchestrator HTTP layer
+// (Content-Type-derived) and are checked here so the policy-enforcer never
+// silently routes a payload to the wrong validator.
+func (s *ValidationService) providerForFormat(format string) (AgreementPhraseProvider, string, error) {
+	switch format {
+	case api.ValidationStrategyEflint:
+		if s.eflintProvider == nil {
+			return nil, "", fmt.Errorf("eflint agreement provider is not configured")
+		}
+		return s.eflintProvider, api.ValidationStrategyEflint, nil
+	case api.ValidationStrategyLegacy, "json", "":
+		// "" preserves backwards-compatibility with callers that do not yet
+		// populate the new Format field; "json" is the orchestrator HTTP
+		// label that maps to the legacy provider.
+		if s.legacyProvider == nil {
+			return nil, "", fmt.Errorf("legacy agreement provider is not configured")
+		}
+		return s.legacyProvider, api.ValidationStrategyLegacy, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported agreement format %q", format)
+	}
+}
+
+// reconcileProviderConfig updates the steward's provider config (and removes
+// the previous-format etcd entry) after a successful save. Failures are
+// logged but not returned: the new agreement is already persisted, and
+// the next evaluation can recover from a partial reconciliation on its own.
+func (s *ValidationService) reconcileProviderConfig(steward, newStrategy string) {
+	if s.providerConfigRepo == nil {
+		return
+	}
+
+	existing, found, err := s.providerConfigRepo.GetProviderConfig(steward)
+	if err != nil {
+		s.logger.Warn("failed to load existing provider config; skipping reconciliation",
+			zap.String("steward", steward),
+			zap.Error(err),
+		)
+		return
+	}
+
+	previousStrategy := ""
+	if found && existing != nil {
+		previousStrategy = existing.ValidationStrategy
+	}
+
+	if found && previousStrategy == newStrategy {
+		return
+	}
+
+	newConfig := &api.ProviderValidationConfig{
+		Name:               steward,
+		ValidationStrategy: newStrategy,
+	}
+	if found && existing != nil {
+		newConfig.AgreementLocation = existing.AgreementLocation
+	}
+
+	if err := s.providerConfigRepo.SaveProviderConfig(steward, newConfig); err != nil {
+		s.logger.Error("failed to update provider config after format switch",
+			zap.String("steward", steward),
+			zap.String("strategy", newStrategy),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if previousStrategy == "" {
+		return
+	}
+
+	s.deleteObsoleteFormatKey(steward, previousStrategy)
+}
+
+// deleteObsoleteFormatKey removes the steward's stale representation in the
+// previously-active format after the format has been switched. Errors are
+// logged because the new agreement is the source of truth either way.
+func (s *ValidationService) deleteObsoleteFormatKey(steward, previousStrategy string) {
+	switch previousStrategy {
+	case api.ValidationStrategyLegacy:
+		if s.agreementRepo == nil {
+			return
+		}
+		if err := s.agreementRepo.DeleteAgreement(steward); err != nil {
+			s.logger.Warn("failed to delete obsolete legacy agreement after format switch",
+				zap.String("steward", steward),
+				zap.Error(err),
+			)
+		}
+	case api.ValidationStrategyEflint:
+		if s.eflintModelRepo == nil {
+			return
+		}
+		if err := s.eflintModelRepo.DeleteEflintModel(steward); err != nil {
+			s.logger.Warn("failed to delete obsolete eFLINT model after format switch",
+				zap.String("steward", steward),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// ValidateAndPersistSharedRules validates the Layer-2 shared rules eFLINT
+// text by parsing it on a clean pool instance and, on success, persists it
+// under /policyEnforcer/eflintRules/shared. The orchestrator triggers a
+// re-evaluation of every running job after this succeeds.
+func (s *ValidationService) ValidateAndPersistSharedRules(ctx context.Context, payload []byte) error {
+	if s.rulesRepo == nil {
+		return fmt.Errorf("shared rules repository is not configured")
+	}
+	if s.reasoner == nil {
+		return fmt.Errorf("reasoner is not configured")
+	}
+
+	rulesText := string(payload)
+	if rulesText == "" {
+		return fmt.Errorf("shared rules payload is empty")
+	}
+
+	s.logger.Info("Validating shared rules against eFLINT")
+	if err := s.reasoner.ValidateSharedRules(ctx, rulesText); err != nil {
+		return err
+	}
+
+	if err := s.rulesRepo.SaveSharedAgreementRules(rulesText); err != nil {
+		s.logger.Error("failed to save shared rules", zap.Error(err))
+		return fmt.Errorf("failed to save shared rules: %w", err)
+	}
+
+	return nil
 }
 
 // GetAllowedClausesForSteward loads the steward's Layer-2 phrases (via the

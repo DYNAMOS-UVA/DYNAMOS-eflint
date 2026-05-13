@@ -114,6 +114,57 @@ func GetKeysFromPrefix(etcdClient *clientv3.Client, key string, opts ...Option) 
 	return keys, nil
 }
 
+// GetFullKeysFromPrefix returns the complete etcd key paths for all entries
+// under the given prefix. Unlike GetKeysFromPrefix it does not strip the path
+// down to the last segment, so callers that need to parse the full hierarchy
+// (e.g. /agents/jobs/<steward>/<user>/<job>) should use this function.
+func GetFullKeysFromPrefix(etcdClient *clientv3.Client, prefix string, opts ...Option) ([]string, error) {
+	var keys []string
+	retryOpts := DefaultRetryOptions
+
+	for _, opt := range opts {
+		opt(&retryOpts)
+	}
+
+	operation := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		resp, err := etcdClient.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithKeysOnly())
+		if err != nil {
+			return &ErrEtcdOperation{Key: prefix, Err: err}
+		}
+
+		if len(resp.Kvs) == 0 {
+			return &ErrKeyNotFound{Key: prefix}
+		}
+
+		for _, ev := range resp.Kvs {
+			keys = append(keys, string(ev.Key))
+		}
+		return nil
+	}
+
+	backoff := bo.NewExponentialBackOff()
+	backoff.InitialInterval = retryOpts.InitialInterval
+	backoff.MaxInterval = retryOpts.MaxInterval
+	backoff.MaxElapsedTime = retryOpts.MaxElapsedTime
+
+	err := bo.Retry(operation, backoff)
+	if err != nil {
+		switch e := err.(type) {
+		case *ErrKeyNotFound:
+			logger.Sugar().Infof("GetFullKeysFromPrefix: no keys found under prefix %q: %v", prefix, e)
+			return []string{}, nil
+		default:
+			logger.Sugar().Errorf("GetFullKeysFromPrefix: failed retrieving keys from etcd: %v", e)
+			return []string{}, err
+		}
+	}
+
+	return keys, nil
+}
+
 func GetValueFromEtcd(etcdClient *clientv3.Client, key string, opts ...Option) (string, error) {
 	var value string
 	// Start with default options

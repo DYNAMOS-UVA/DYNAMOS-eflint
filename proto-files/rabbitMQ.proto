@@ -124,6 +124,7 @@ message PolicyUpdate {
   ValidationResponse validation_response = 5;
   bytes agreement_payload = 6;
   string agreement_name = 7;
+  string format = 8; // "json" | "eflint"; empty for sharedRulesUpdate
 }
 
 message CompositionRequest {

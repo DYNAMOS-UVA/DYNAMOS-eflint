@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,26 +56,80 @@ func (p *LegacyAgreementPhraseProvider) GetLayer2Phrases(steward string) (string
 	return TranslateLegacyAgreement(agreement), true, nil
 }
 
-// ValidateAndPersist validates a JSON legacy agreement and saves it.
+// ValidateAndPersist validates a JSON legacy agreement against the expected
+// api.Agreement structure and, if it conforms, saves it.
+//
+// Validation rules:
+//   - JSON must decode strictly into api.Agreement (unknown fields rejected).
+//   - The agreement Name must match the steward derived from the request URL.
+//   - Relations, ComputeProviders, and Archetypes must be present (non-empty),
+//     since an agreement with none of these would never derive any
+//     relation-allows-* or steward-supports-* facts and is therefore useless.
+//   - Each Relation must declare at least one requestType or dataSet, and at
+//     least one allowedArchetype or allowedComputeProvider.
 func (p *LegacyAgreementPhraseProvider) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
-	var agreement api.Agreement
-	if err := json.Unmarshal(payload, &agreement); err != nil {
-		p.logger.Error("failed to unmarshal legacy agreement", zap.Error(err))
+	agreement, err := decodeStrictAgreement(payload)
+	if err != nil {
+		p.logger.Error("failed to decode legacy agreement", zap.Error(err))
 		return fmt.Errorf("invalid legacy agreement JSON: %w", err)
 	}
 
-	if agreement.Name != steward {
-		p.logger.Error("agreement name mismatch",
-			zap.String("expected", steward),
-			zap.String("actual", agreement.Name),
+	if err := validateAgreementStructure(agreement, steward); err != nil {
+		p.logger.Error("legacy agreement structure invalid",
+			zap.String("steward", steward),
+			zap.Error(err),
 		)
-		return fmt.Errorf("agreement name mismatch: expected %s, got %s", steward, agreement.Name)
+		return err
 	}
 
-	if err := p.agreementRepo.SaveAgreement(steward, &agreement); err != nil {
+	if err := p.agreementRepo.SaveAgreement(steward, agreement); err != nil {
 		p.logger.Error("failed to save legacy agreement", zap.Error(err))
 		return fmt.Errorf("failed to save legacy agreement: %w", err)
 	}
 
+	return nil
+}
+
+// decodeStrictAgreement decodes the payload into api.Agreement while rejecting
+// unknown fields. This catches typos and stray properties early so an
+// orchestrator-side validation error is preferred over silently storing a
+// degenerate agreement.
+func decodeStrictAgreement(payload []byte) (*api.Agreement, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	var agreement api.Agreement
+	if err := dec.Decode(&agreement); err != nil {
+		return nil, err
+	}
+	return &agreement, nil
+}
+
+// validateAgreementStructure performs the semantic checks that decodeStrict
+// cannot express. It mirrors the assumptions made by TranslateLegacyAgreement,
+// which produces no useful Layer-2 phrases when these fields are empty.
+func validateAgreementStructure(agreement *api.Agreement, steward string) error {
+	if agreement.Name == "" {
+		return fmt.Errorf("agreement field 'name' is required")
+	}
+	if agreement.Name != steward {
+		return fmt.Errorf("agreement name mismatch: expected %s, got %s", steward, agreement.Name)
+	}
+	if len(agreement.Relations) == 0 {
+		return fmt.Errorf("agreement field 'relations' must contain at least one entry")
+	}
+	if len(agreement.ComputeProviders) == 0 {
+		return fmt.Errorf("agreement field 'computeProviders' must contain at least one entry")
+	}
+	if len(agreement.Archetypes) == 0 {
+		return fmt.Errorf("agreement field 'archetypes' must contain at least one entry")
+	}
+	for relationKey, relation := range agreement.Relations {
+		if len(relation.RequestTypes) == 0 && len(relation.DataSets) == 0 {
+			return fmt.Errorf("relation %q must declare at least one of 'requestTypes' or 'dataSets'", relationKey)
+		}
+		if len(relation.AllowedArchetypes) == 0 && len(relation.AllowedComputeProviders) == 0 {
+			return fmt.Errorf("relation %q must declare at least one of 'allowedArchetypes' or 'allowedComputeProviders'", relationKey)
+		}
+	}
 	return nil
 }

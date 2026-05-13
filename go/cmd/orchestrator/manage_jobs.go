@@ -66,9 +66,40 @@ func deleteJobInfo(jobNames []string, userName string, changedAgreementName stri
 	}
 }
 
+// checkAllJobs re-evaluates running jobs for every steward that has at least
+// one /agents/jobs/<steward>/... entry. Used after a shared-rules update,
+// which affects derivations for every agreement.
+func checkAllJobs() {
+	rootKey := "/agents/jobs/"
+	keys, err := etcd.GetFullKeysFromPrefix(etcdClient, rootKey, etcd.WithMaxElapsedTime(2*time.Second))
+	if err != nil {
+		logger.Sugar().Warnf("error listing job keys for global re-evaluation: %v", err)
+		return
+	}
+
+	stewards := make(map[string]struct{})
+	for _, k := range keys {
+		trimmed := strings.TrimPrefix(k, rootKey)
+		if trimmed == "" {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "/", 2)
+		stewards[parts[0]] = struct{}{}
+	}
+
+	if len(stewards) == 0 {
+		logger.Debug("no active stewards with running jobs; nothing to re-evaluate")
+		return
+	}
+
+	for steward := range stewards {
+		checkJobs(steward)
+	}
+}
+
 func checkJobs(agreementName string) {
 	key := fmt.Sprintf("/agents/jobs/%s/", agreementName)
-	jobKeys, err := etcd.GetKeysFromPrefix(etcdClient, key, etcd.WithMaxElapsedTime(2*time.Second))
+	jobKeys, err := etcd.GetFullKeysFromPrefix(etcdClient, key, etcd.WithMaxElapsedTime(2*time.Second))
 	if err != nil {
 		logger.Sugar().Warnf("error get jobs: %v", err)
 	}
@@ -78,12 +109,17 @@ func checkJobs(agreementName string) {
 		parts := strings.Split(k, "/")
 		if len(parts) >= 6 {
 			userName := parts[4]
+			if userName == "queueInfo" {
+				continue
+			}
 			jobName := parts[5]
 			userJobs[userName] = append(userJobs[userName], jobName)
 		}
 	}
 
+	logger.Sugar().Debugf("checkJobs: agreement=%q found %d user(s) with active jobs", agreementName, len(userJobs))
 	for userName, jobNames := range userJobs {
+		logger.Sugar().Debugf("checkJobs: user=%q jobs(%d)=%v", userName, len(jobNames), jobNames)
 		if len(jobNames) == 0 {
 			logger.Debug("no active jobs for this user")
 			continue
@@ -143,8 +179,41 @@ func evaluateArchetypeInActiveJobs(jobNames []string, agreementName string, rela
 	}
 }
 
+// deleteJobAcrossAgents removes every etcd entry (job info + queueInfo) for the
+// given job across all agents that were holding it. agentsWithThisJob is the
+// same map that was built by getJobAcrossAgents so it already contains both
+// JobName and LocalJobName per agent.
+func deleteJobAcrossAgents(ctx context.Context, agentsWithThisJob map[string]*pb.CompositionRequest, userName string) {
+	for agent, jobData := range agentsWithThisJob {
+		jobKey := fmt.Sprintf("/agents/jobs/%s/%s/%s", agent, userName, jobData.JobName)
+		if _, err := etcdClient.Delete(ctx, jobKey); err != nil {
+			logger.Sugar().Warnf("deleteJobAcrossAgents: error deleting job key %s: %v", jobKey, err)
+		} else {
+			logger.Sugar().Debugf("deleteJobAcrossAgents: deleted job key %s", jobKey)
+		}
+
+		queueInfoKey := fmt.Sprintf("/agents/jobs/%s/queueInfo/%s", agent, jobData.LocalJobName)
+		if _, err := etcdClient.Delete(ctx, queueInfoKey); err != nil {
+			logger.Sugar().Warnf("deleteJobAcrossAgents: error deleting queueInfo key %s: %v", queueInfoKey, err)
+		} else {
+			logger.Sugar().Debugf("deleteJobAcrossAgents: deleted queueInfo key %s", queueInfoKey)
+		}
+	}
+}
+
 func processPolicyUpdate(ctx context.Context, agentsWithThisJob map[string]*pb.CompositionRequest, policyUpdate *pb.PolicyUpdate) {
 	logger.Sugar().Debugf("processPolicyUpdate")
+
+	vr := policyUpdate.ValidationResponse
+
+	// If the policy enforcer returned no valid data providers at all, every
+	// running job for this user must be cleaned up — there is nothing left to
+	// route to.
+	if vr == nil || len(vr.ValidDataproviders) == 0 {
+		logger.Sugar().Infof("processPolicyUpdate: no valid data providers in ValidationResponse — deleting all active jobs for user %q", policyUpdate.User.UserName)
+		deleteJobAcrossAgents(ctx, agentsWithThisJob, policyUpdate.User.UserName)
+		return
+	}
 
 	// TODO: Kinda threw this in without testing..
 	authorizedProviders, err := getAuthorizedProviders(policyUpdate.ValidationResponse)
@@ -159,6 +228,7 @@ func processPolicyUpdate(ctx context.Context, agentsWithThisJob map[string]*pb.C
 
 	logger.Sugar().Debugf("New archetype: %v", archetype)
 
+	// Get the archetype configuration from etcd
 	var archetypeConfig api.Archetype
 	_, err = etcd.GetAndUnmarshalJSON(etcdClient, fmt.Sprintf("/archetypes/%s", archetype), &archetypeConfig)
 	if err != nil {
@@ -170,34 +240,48 @@ func processPolicyUpdate(ctx context.Context, agentsWithThisJob map[string]*pb.C
 	computeProviderAlready := false
 	var ttp lib.AgentDetails
 	for agent, currentData := range agentsWithThisJob {
-		if currentData.ArchetypeId == archetype {
-			logger.Sugar().Debug("same archetype, do nothing")
-			return
-		}
 		key := fmt.Sprintf("/agents/jobs/%s/%s/%s", agent, policyUpdate.User.UserName, currentData.JobName)
 
+		// Data-provider roles that are no longer in ValidDataproviders have had
+		// their authorisation revoked — delete immediately regardless of archetype.
+		// computeProvider agents are intentionally absent from ValidDataproviders
+		// and are handled further below.
+		if currentData.Role != "computeProvider" {
+			if _, isValid := vr.ValidDataproviders[agent]; !isValid {
+				logger.Sugar().Infof("processPolicyUpdate: agent %q is no longer a valid data provider — removing job entry", agent)
+				if _, err := etcdClient.Delete(ctx, key); err != nil {
+					logger.Sugar().Warnf("error deleting key from etcd: %v", err)
+				}
+				continue
+			}
+		}
+
+		// Archetype unchanged for this agent — nothing to update.
+		if currentData.ArchetypeId == archetype {
+			logger.Sugar().Debugf("processPolicyUpdate: agent %q already on archetype %q, skipping", agent, archetype)
+			continue
+		}
+
 		if archetypeConfig.ComputeProvider != "other" {
+			// computeToData archetype
 			if currentData.Role == "computeProvider" {
-				// Delete this job info
-				_, err := etcdClient.Delete(ctx, key)
-				if err != nil {
+				if _, err := etcdClient.Delete(ctx, key); err != nil {
 					logger.Sugar().Warnf("error deleting key from etcd: %v", err)
 				}
 				continue
 			}
 
-			// New archetype is computeToData
 			newData := currentData
 			newData.ArchetypeId = archetype
 			newData.Role = "all"
 			newData.DataProviders = []string{}
-			err := etcd.SaveStructToEtcd[*pb.CompositionRequest](etcdClient, key, newData)
-			if err != nil {
+			if err := etcd.SaveStructToEtcd[*pb.CompositionRequest](etcdClient, key, newData); err != nil {
 				logger.Sugar().Errorf("Error saving struct to etcd: %v", err)
 				return
 			}
 			computeProviderAlready = true
 		} else {
+			// dataThroughTtp archetype
 			var err error
 			ttp, err = chooseThirdParty(policyUpdate.ValidationResponse)
 			if err != nil {
@@ -209,42 +293,26 @@ func processPolicyUpdate(ctx context.Context, agentsWithThisJob map[string]*pb.C
 				computeProviderAlready = true
 				continue
 			} else if currentData.Role == "computeProvider" && agent != ttp.Name {
-				// Delete this job info
-				_, err := etcdClient.Delete(ctx, key)
-				if err != nil {
+				if _, err := etcdClient.Delete(ctx, key); err != nil {
 					logger.Sugar().Warnf("error deleting key from etcd: %v", err)
 				}
 				continue
 			}
 
 			if currentData.Role == "all" {
-				_, ok := policyUpdate.ValidationResponse.ValidDataproviders[agent]
-				if !ok {
-					// Delete this job info
-					_, err := etcdClient.Delete(ctx, key)
-					if err != nil {
-						logger.Sugar().Warnf("error deleting key from etcd: %v", err)
-					}
-				}
-
-				// New archetype is dataThroughTtp
 				newData := currentData
 				newData.ArchetypeId = archetype
 				newData.Role = "dataProvider"
 				newData.DataProviders = []string{}
-
-				err = etcd.SaveStructToEtcd[*pb.CompositionRequest](etcdClient, key, newData)
-				if err != nil {
+				if err = etcd.SaveStructToEtcd[*pb.CompositionRequest](etcdClient, key, newData); err != nil {
 					logger.Sugar().Errorf("Error saving struct to etcd: %v", err)
 					return
 				}
-
 			}
-
 		}
 	}
 
-	if !computeProviderAlready {
+	if !computeProviderAlready && archetype == "dataThroughTtp" {
 		compositionRequest := &pb.CompositionRequest{}
 		compositionRequest.User = policyUpdate.User
 		tmpDataProvider := []string{}
@@ -261,6 +329,10 @@ func processPolicyUpdate(ctx context.Context, agentsWithThisJob map[string]*pb.C
 			break
 		}
 
+		if ttp.RoutingKey == "" {
+			logger.Sugar().Errorf("processPolicyUpdate: ttp routing key is empty, cannot send composition request for job %q", compositionRequest.JobName)
+			return
+		}
 		compositionRequest.DestinationQueue = ttp.RoutingKey
 
 		c.SendCompositionRequest(ctx, compositionRequest)
@@ -307,6 +379,9 @@ func getJobAcrossAgents(ctx context.Context, targetMap map[string]*pb.Compositio
 func handleRequestApproval(ctx context.Context, validationResponse *pb.ValidationResponse) {
 	result := &pb.RequestApprovalResponse{Type: "requestApprovalResponse", RequestMetadata: &pb.RequestMetadata{DestinationQueue: "api-gateway-in"}}
 
+	// Always populate User so the api-gateway can route the response by User.Id.
+	result.User = validationResponse.User
+
 	authorizedProviders, err := getAuthorizedProviders(validationResponse)
 	if err != nil {
 		result.Error = err.Error()
@@ -315,8 +390,7 @@ func handleRequestApproval(ctx context.Context, validationResponse *pb.Validatio
 	}
 
 	if len(authorizedProviders) == 0 {
-		// TODO Respond with the following to the rabbitmq queue
-		// []byte("Request was processed, but no agreements or available dataproviders have been found")
+		logger.Sugar().Warn("Request was processed, but no agreements or available dataproviders have been found")
 		result.Error = "Request was processed, but no agreements or available dataproviders have been found"
 		c.SendRequestApprovalResponse(ctx, result)
 		return

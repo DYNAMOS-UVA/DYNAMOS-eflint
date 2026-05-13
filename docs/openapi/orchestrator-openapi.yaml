@@ -14,23 +14,60 @@ info:
     All configuration endpoints follow a generic CRUD pattern backed by etcd.
     - **GET** without a path suffix returns all items as an array
     - **GET** with `/{name}` returns a single item by its name
-    - **PUT** creates or updates an item (the `name` field in the body is used
-      as the etcd key)
+    - **PUT** creates or updates an item
+    
+    ## Policy Update Endpoints
+    The `/api/v1/policyEnforcer` surface supports two types of runtime policy
+    updates. Both forward the payload to the Policy Enforcer over RabbitMQ for
+    validation before any state is changed.
+
+    ### Per-steward agreement update
+    `PUT /api/v1/policyEnforcer/{steward}`
+
+    The **Content-Type header** selects the format of the agreement:
+    - `Content-Type: application/json` — legacy JSON format (`Agreement` schema).
+      Validated by strict structural reflection (unknown fields rejected, all
+      required collections must be non-empty).
+    - Any other Content-Type (e.g. `text/plain`, `application/eflint`) —
+      raw eFLINT Layer-2 phrases. Validated by sending the phrases to a clean
+      eFLINT pool instance; a parse or reasoning error causes the update to be
+      rejected.
+
+    On success the Policy Enforcer reconciles the steward's provider-config in
+    etcd (flipping `validationStrategy` if the format changed and deleting the
+    now-obsolete alternate representation), then running jobs for that steward
+    are re-evaluated.
+
+    ### Shared rules update
+    `PUT /api/v1/policyEnforcer/sharedRules`
+
+    Updates the consortium-wide Layer-2 shared rules (always raw eFLINT text).
+    Because shared rules affect derivations for every steward, **all running jobs
+    for all stewards** are re-evaluated on approval.
     
     ## Architecture
     ```
     ┌─────────────────────────────────────────────────────────────────────┐
     │                          HTTP API Layer                             │
     │  /api/v1/archetypes    /api/v1/requestTypes    /api/v1/microservices│
-    │  /api/v1/policyEnforcer                        /api/v1/updateEtc   │
+    │  /api/v1/policyEnforcer/{steward}  /api/v1/policyEnforcer/sharedRules│
+    │  /api/v1/updateEtc                                                  │
+    └───────────────────────────────┬─────────────────────────────────────┘
+                                    │ RabbitMQ (policy updates)
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                       Policy Enforcer                               │
+    │  validates JSON shape or eFLINT phrases                             │
+    │  reconciles /policyEnforcer/configs/{steward}                       │
     └───────────────────────────────┬─────────────────────────────────────┘
                                     │
                                     ▼
     ┌─────────────────────────────────────────────────────────────────────┐
     │                           etcd Store                                │
     │  /archetypes/*   /requestTypes/*   /microservices/*                  │
-    │  /policyEnforcer/agreements/*      /policyEnforcer/configs/*         │
-    │  /datasets/*     /agents/*                                          │
+    │  /policyEnforcer/agreements/*      /policyEnforcer/eflintModels/*   │
+    │  /policyEnforcer/eflintRules/shared                                 │
+    │  /policyEnforcer/configs/*         /datasets/*     /agents/*        │
     └─────────────────────────────────────────────────────────────────────┘
     ```
   version: 1.0.0
@@ -374,18 +411,30 @@ paths:
   # ---------------------------------------------------------------------------
   /api/v1/policyEnforcer:
     get:
-      summary: List all agreements
+      summary: List all agreements (JSON-format only)
       description: |
-        Returns all policy agreements stored in etcd under
-        `/policyEnforcer/agreements`. Agreements define which requesters at
-        which organisations are allowed to access which datasets, request
-        types, archetypes, and compute providers.
+        Performs a prefix scan over the `/policyEnforcer` etcd namespace and
+        returns every value that deserialises successfully as the `Agreement`
+        JSON schema.
+
+        **Format coverage:**
+        - **JSON-format stewards** (`validationStrategy: "legacy"`) are stored at
+          `/policyEnforcer/agreements/{steward}` and are returned here.
+        - **eFLINT-format stewards** (`validationStrategy: "eflint"`) are stored
+          as raw text at `/policyEnforcer/eflintModels/{steward}`. They cannot be
+          deserialised as `Agreement` JSON and are **silently omitted** from this
+          list.
+
+        To determine which format a steward uses, consult the provider config at
+        `/policyEnforcer/configs/{steward}` (see `ProviderValidationConfig`).
       operationId: listAgreements
       tags:
         - Policy Enforcer / Agreements
       responses:
         '200':
-          description: List of all agreements
+          description: |
+            List of JSON-format agreements. eFLINT-format stewards are not
+            included.
           content:
             application/json:
               schema:
@@ -417,25 +466,180 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/policyEnforcer/sharedRules:
     put:
-      summary: Create or update an agreement
+      summary: Update the Layer-2 shared eFLINT rules
       description: |
-        Creates or updates a policy agreement. The request body is forwarded
-        to the Policy Enforcer for validation before being stored.
-        
+        Replaces the consortium-wide Layer-2 shared agreement rules with the
+        provided eFLINT text. Shared rules encode the derivation logic that
+        bridges per-steward Layer-2 facts (agreements, steward-supports-*,
+        relation-allows-*) to the Layer-1 query facts used by the request-
+        approval flow.
+
+        **Validation:** The eFLINT text is sent to a clean pool instance on top
+        of the Layer-1 baseline. A parse or reasoning error causes the update to
+        be rejected (400) and the current rules are left unchanged.
+
+        **Side effects on approval:**
+        1. The new rules are saved to etcd at `/policyEnforcer/eflintRules/shared`.
+        2. Every running job for **every steward** is re-evaluated, because
+           shared rules affect derivations across all agreements.
+
+        The call blocks for up to 30 seconds waiting for Policy Enforcer
+        validation.
+
+        > **Note:** This endpoint does **not** accept JSON — only raw eFLINT
+        > phrases. Use `Content-Type: text/plain`.
+      operationId: putSharedRules
+      tags:
+        - Policy Enforcer / Agreements
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              description: Raw eFLINT Layer-2 shared rules text
+            example: |
+              // Layer-2 shared agreement rules
+              Fact data-steward Identified by String.
+              Fact requester Identified by String.
+              // ... additional rule declarations ...
+      responses:
+        '200':
+          description: Shared rules validated and stored; all jobs re-evaluated
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        '400':
+          description: |
+            Bad request — empty body, or eFLINT validation rejected by the
+            Policy Enforcer.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                empty_body:
+                  value: "request body is empty"
+                rejected:
+                  value: "Shared rules update rejected by Policy Enforcer"
+        '500':
+          description: Failed to dispatch the update to the Policy Enforcer
+          content:
+            text/plain:
+              schema:
+                type: string
+        '504':
+          description: Timeout waiting for Policy Enforcer validation (30 s)
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Timeout waiting for Policy Enforcer validation"
+
+  /api/v1/policyEnforcer/{steward}:
+    get:
+      summary: Get a JSON-format agreement by steward name
+      description: |
+        Reads the etcd key `/policyEnforcer/{steward}` and returns it
+        deserialised as the `Agreement` JSON schema.
+
+        **Format coverage and limitations:**
+        - **JSON-format stewards** (`validationStrategy: "legacy"`) are saved by
+          the Policy Enforcer at `/policyEnforcer/agreements/{steward}`, not at
+          the flat key `/policyEnforcer/{steward}`. A direct GET for a JSON-format
+          steward will therefore return **404** unless an agreement was written at
+          that flat path by another means.
+        - **eFLINT-format stewards** (`validationStrategy: "eflint"`) are stored
+          as raw text at `/policyEnforcer/eflintModels/{steward}`. The raw eFLINT
+          phrases cannot be returned through this endpoint.
+
+        > **Recommendation:** Use the `/api/v1/policyEnforcer` list endpoint to
+        > inspect JSON-format agreements, and check the provider config via
+        > `/policyEnforcer/configs/{steward}` to determine a steward's format.
+        > To inspect an eFLINT-format steward's effective policy, use the
+        > Policy Enforcer's `GET /api/v1/policy-enforcer/allowed-clauses?steward={steward}`
+        > endpoint which evaluates the eFLINT phrases directly.
+      operationId: getAgreement
+      tags:
+        - Policy Enforcer / Agreements
+      parameters:
+        - $ref: '#/components/parameters/StewardNameParam'
+      responses:
+        '200':
+          description: Agreement found at the flat `/policyEnforcer/{steward}` etcd key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agreement'
+              example:
+                name: "VU"
+                relations:
+                  jorrit.stutterheim@cloudnation.nl:
+                    ID: "jorrit.stutterheim@cloudnation.nl"
+                    requestTypes:
+                      - "sqlDataRequest"
+                    dataSets:
+                      - "wageGap"
+                    allowedArchetypes:
+                      - "computeToData"
+                      - "dataThroughTtp"
+                    allowedComputeProviders:
+                      - "SURF"
+                computeProviders:
+                  - "SURF"
+                archetypes:
+                  - "computeToData"
+                  - "dataThroughTtp"
+        '404':
+          description: |
+            Key `/policyEnforcer/{steward}` not found in etcd. This is the
+            expected response for all stewards whose agreements are managed
+            by the Policy Enforcer (see description above).
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unknown request"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Update a steward's policy agreement
+      description: |
+        Validates and replaces the policy agreement for the specified steward.
+        The payload format is selected by the **`Content-Type`** header:
+
+        | Content-Type | Format | Validation |
+        |---|---|---|
+        | `application/json` | Legacy JSON (`Agreement` schema) | Strict structural check: unknown fields rejected; `relations`, `computeProviders`, and `archetypes` must be non-empty; each relation must declare at least one of `requestTypes`/`dataSets` and at least one of `allowedArchetypes`/`allowedComputeProviders`. |
+        | `text/plain` or any other | Raw eFLINT Layer-2 phrases | Parsed by a clean eFLINT pool instance on top of the Layer-1 baseline; a parse or reasoning error rejects the update. |
+
+        > **Reserved path:** `sharedRules` is a reserved steward name that routes
+        > to the shared-rules endpoint. Do not use it as an actual steward name.
+
         **Flow:**
-        1. The orchestrator sends a `policyUpdate` message with type
-           `agreementUpdate` to the Policy Enforcer via RabbitMQ.
-        2. The Policy Enforcer validates the agreement and responds.
-        3. If approved, the agreement is stored in etcd and any affected
-           running jobs are updated.
-        4. If rejected, a 400 error is returned.
-        
+        1. Orchestrator forwards a `PolicyUpdate{type:"agreementUpdate", format, agreementName, agreementPayload}` to the Policy Enforcer via RabbitMQ.
+        2. Policy Enforcer validates the payload with the appropriate validator.
+        3. On success: payload saved to etcd, provider-config at `/policyEnforcer/configs/{steward}` updated to reflect the new `validationStrategy`. If the format changed (e.g. JSON → eFLINT), the obsolete alternate etcd key is deleted.
+        4. Running jobs for the steward are re-evaluated.
+        5. On failure: 400 returned, no state changed.
+
         The call blocks for up to 30 seconds waiting for Policy Enforcer
         validation.
       operationId: putAgreement
       tags:
         - Policy Enforcer / Agreements
+      parameters:
+        - $ref: '#/components/parameters/StewardNameParam'
       requestBody:
         required: true
         content:
@@ -443,8 +647,8 @@ paths:
             schema:
               $ref: '#/components/schemas/Agreement'
             examples:
-              vu_agreement:
-                summary: Agreement for the VU organisation
+              vu_agreement_json:
+                summary: JSON agreement for the VU organisation
                 value:
                   name: "VU"
                   relations:
@@ -464,6 +668,23 @@ paths:
                   archetypes:
                     - "computeToData"
                     - "dataThroughTtp"
+          text/plain:
+            schema:
+              type: string
+              description: Raw eFLINT Layer-2 phrases for the steward
+            examples:
+              vu_agreement_eflint:
+                summary: eFLINT agreement for the VU organisation
+                value: |
+                  +agreement("VU").
+                  +steward-supports-archetype("VU","computeToData").
+                  +steward-supports-archetype("VU","dataThroughTtp").
+                  +steward-supports-compute-provider("VU","SURF").
+                  +has-relation("VU","jorrit.stutterheim@cloudnation.nl").
+                  +relation-allows-request-type("VU","jorrit.stutterheim@cloudnation.nl","sqlDataRequest").
+                  +relation-allows-dataset("VU","jorrit.stutterheim@cloudnation.nl","wageGap").
+                  +relation-allows-archetype("VU","jorrit.stutterheim@cloudnation.nl","computeToData").
+                  +relation-allows-compute-provider("VU","jorrit.stutterheim@cloudnation.nl","SURF").
       responses:
         '200':
           description: Agreement validated by Policy Enforcer and stored
@@ -474,60 +695,38 @@ paths:
                 example: "OK"
         '400':
           description: |
-            Bad request – invalid body, missing `name` field, or policy
-            update rejected by the Policy Enforcer.
+            Bad request — empty body, structural validation failed (JSON), eFLINT
+            parse error, or the Policy Enforcer rejected the update.
           content:
             text/plain:
               schema:
                 type: string
               examples:
-                bad_payload:
-                  value: "Payload must be JSON and contain a 'name' field"
+                empty_body:
+                  value: "request body is empty"
+                json_unknown_field:
+                  value: "invalid legacy agreement JSON: json: unknown field \"unexpectedField\""
+                json_name_mismatch:
+                  value: "invalid legacy agreement JSON: agreement name mismatch: expected VU, got UVA"
+                json_missing_relations:
+                  value: "invalid legacy agreement JSON: agreement field 'relations' must contain at least one entry"
+                eflint_parse_error:
+                  value: "Policy update rejected by Policy Enforcer"
                 rejected:
                   value: "Policy update rejected by Policy Enforcer"
+        '500':
+          description: Failed to dispatch the update to the Policy Enforcer
+          content:
+            text/plain:
+              schema:
+                type: string
         '504':
-          description: Timeout waiting for Policy Enforcer validation
+          description: Timeout waiting for Policy Enforcer validation (30 s)
           content:
             text/plain:
               schema:
                 type: string
                 example: "Timeout waiting for Policy Enforcer validation"
-        '500':
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  /api/v1/policyEnforcer/{name}:
-    get:
-      summary: Get an agreement by name
-      description: Returns a single policy agreement by its name.
-      operationId: getAgreement
-      tags:
-        - Policy Enforcer / Agreements
-      parameters:
-        - $ref: '#/components/parameters/ResourceNameParam'
-      responses:
-        '200':
-          description: Agreement found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Agreement'
-        '404':
-          description: Agreement not found
-          content:
-            text/plain:
-              schema:
-                type: string
-                example: "Unknown request"
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
 
   # ---------------------------------------------------------------------------
   # Configuration Endpoints
@@ -577,6 +776,18 @@ components:
       schema:
         type: string
       example: "computeToData"
+
+    StewardNameParam:
+      name: steward
+      in: path
+      required: true
+      description: |
+        The data steward (organisation) name, e.g. `VU` or `UVA`.
+        The reserved value `sharedRules` is not a valid steward name —
+        it routes to the shared Layer-2 rules update endpoint.
+      schema:
+        type: string
+      example: "VU"
 
   # ---------------------------------------------------------------------------
   # Schemas
@@ -675,20 +886,41 @@ components:
     # -------------------------------------------------------------------------
     Agreement:
       type: object
+      description: |
+        A legacy JSON policy agreement for a single data steward.
+
+        **Strict validation rules** (enforced by the Policy Enforcer when
+        submitted via `PUT /api/v1/policyEnforcer/{steward}` with
+        `Content-Type: application/json`):
+        - Unknown fields are rejected.
+        - `name` must match the `{steward}` path parameter.
+        - `relations`, `computeProviders`, and `archetypes` must each contain
+          at least one entry.
+        - Every `Relation` must declare at least one of `requestTypes` or
+          `dataSets`, and at least one of `allowedArchetypes` or
+          `allowedComputeProviders`.
       required:
         - name
+        - relations
+        - computeProviders
+        - archetypes
+      additionalProperties: false
       properties:
         name:
           type: string
-          description: Agreement name (typically the organisation name)
+          description: |
+            Agreement name — must exactly match the `{steward}` path
+            parameter of the PUT request.
           example: "VU"
         relations:
           type: object
           additionalProperties:
             $ref: '#/components/schemas/Relation'
+          minProperties: 1
           description: |
             Map of requester identifier → their permissions.
-            Each key is typically a user email address.
+            Each key is typically a user email address. Must contain at
+            least one entry.
           example:
             jorrit.stutterheim@cloudnation.nl:
               ID: "jorrit.stutterheim@cloudnation.nl"
@@ -700,17 +932,25 @@ components:
           type: array
           items:
             type: string
-          description: Compute providers available under this agreement
+          minItems: 1
+          description: Compute providers available under this agreement (at least one required)
           example: ["SURF"]
         archetypes:
           type: array
           items:
             type: string
-          description: Archetypes allowed under this agreement
+          minItems: 1
+          description: Archetypes allowed under this agreement (at least one required)
           example: ["computeToData", "dataThroughTtp"]
 
     Relation:
       type: object
+      description: |
+        Permissions for a single requester at the steward.
+
+        At least one of `requestTypes` or `dataSets` must be non-empty, and
+        at least one of `allowedArchetypes` or `allowedComputeProviders` must
+        be non-empty.
       properties:
         ID:
           type: string
@@ -720,26 +960,74 @@ components:
           type: array
           items:
             type: string
-          description: Allowed request types for this requester
+          description: |
+            Allowed request types for this requester.
+            At least one of `requestTypes` or `dataSets` is required.
           example: ["sqlDataRequest"]
         dataSets:
           type: array
           items:
             type: string
-          description: Datasets this requester may access
+          description: |
+            Datasets this requester may access.
+            At least one of `requestTypes` or `dataSets` is required.
           example: ["wageGap"]
         allowedArchetypes:
           type: array
           items:
             type: string
-          description: Archetypes this requester may use
+          description: |
+            Archetypes this requester may use.
+            At least one of `allowedArchetypes` or `allowedComputeProviders` is required.
           example: ["computeToData", "dataThroughTtp"]
         allowedComputeProviders:
           type: array
           items:
             type: string
-          description: Compute providers this requester may use
+          description: |
+            Compute providers this requester may use.
+            At least one of `allowedArchetypes` or `allowedComputeProviders` is required.
           example: ["SURF"]
+
+    # -------------------------------------------------------------------------
+    # Provider Config Schema
+    # -------------------------------------------------------------------------
+    ProviderValidationConfig:
+      type: object
+      description: |
+        Stored at `/policyEnforcer/configs/{steward}` in etcd. Determines
+        which agreement storage format and validation strategy the Policy
+        Enforcer uses for a given steward.
+
+        Updated automatically by the Policy Enforcer when a steward's
+        agreement is replaced via `PUT /api/v1/policyEnforcer/{steward}`.
+        When the format changes (e.g. JSON → eFLINT), the obsolete etcd key
+        under the previous format's prefix is also deleted.
+      required:
+        - name
+        - validationStrategy
+      properties:
+        name:
+          type: string
+          description: Steward (organisation) name
+          example: "VU"
+        validationStrategy:
+          type: string
+          enum:
+            - legacy
+            - eflint
+          description: |
+            Which validation strategy and storage path the Policy Enforcer
+            uses for this steward:
+            - `legacy` — JSON `Agreement` at `/policyEnforcer/agreements/{steward}`
+            - `eflint` — raw eFLINT phrases at `/policyEnforcer/eflintModels/{steward}`
+          example: "eflint"
+        agreementLocation:
+          type: string
+          description: |
+            Optional hint for the storage location used during initial
+            bootstrapping (e.g. path to the `.eflint` file on disk).
+          example: "/eflint-models/VU.eflint"
 
     # -------------------------------------------------------------------------
     # Common Schemas

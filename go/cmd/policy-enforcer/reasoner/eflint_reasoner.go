@@ -3,6 +3,7 @@ package reasoner
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -43,12 +44,23 @@ func (r *EflintReasoner) IsRunning() bool {
 // pool instance (so syntactic errors and unbound references surface as
 // SendPhrases errors) and, on success, persists it under
 // /policyEnforcer/eflintModels/{organization}.
-func (r *EflintReasoner) ValidateAndPersistModel(ctx context.Context, organization string, modelText string) error {
+//
+// sharedRulesText (Layer 2 shared rules) is loaded onto the instance first so
+// that fact types like `agreement` and `steward-supports-archetype` are in
+// scope when the per-steward phrases are evaluated.
+func (r *EflintReasoner) ValidateAndPersistModel(ctx context.Context, organization string, sharedRulesText string, modelText string) error {
 	entry, err := r.pool.Acquire()
 	if err != nil {
 		return fmt.Errorf("failed to acquire eFLINT instance: %w", err)
 	}
 	defer r.pool.Release(entry)
+
+	if strings.TrimSpace(sharedRulesText) != "" {
+		if _, err := entry.Manager.SendPhrases(sharedRulesText); err != nil {
+			r.logger.Error("failed to load shared rules during model validation", zap.Error(err))
+			return fmt.Errorf("failed to load shared rules during model validation: %w", err)
+		}
+	}
 
 	if _, err := entry.Manager.SendPhrases(modelText); err != nil {
 		r.logger.Error("invalid eFLINT specification", zap.Error(err))
@@ -58,6 +70,25 @@ func (r *EflintReasoner) ValidateAndPersistModel(ctx context.Context, organizati
 	if err := r.modelRepo.SaveEflintModel(organization, modelText); err != nil {
 		r.logger.Error("failed to save eFLINT model", zap.Error(err))
 		return fmt.Errorf("failed to save eFLINT model: %w", err)
+	}
+
+	return nil
+}
+
+// ValidateSharedRules verifies that the Layer-2 shared rules eFLINT text
+// parses against the Layer-1 baseline of a clean pool instance. The instance
+// is released (and restarted to empty) afterwards, so this performs no state
+// changes; persistence to etcd is handled by the caller.
+func (r *EflintReasoner) ValidateSharedRules(ctx context.Context, rulesText string) error {
+	entry, err := r.pool.Acquire()
+	if err != nil {
+		return fmt.Errorf("failed to acquire eFLINT instance: %w", err)
+	}
+	defer r.pool.Release(entry)
+
+	if _, err := entry.Manager.SendPhrases(rulesText); err != nil {
+		r.logger.Error("invalid eFLINT shared rules", zap.Error(err))
+		return fmt.Errorf("invalid eFLINT shared rules: %w", err)
 	}
 
 	return nil

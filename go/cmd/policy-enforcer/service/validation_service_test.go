@@ -16,7 +16,8 @@ import (
 // --- Test doubles -----------------------------------------------------------
 
 type fakeProviderConfigRepo struct {
-	configs map[string]*api.ProviderValidationConfig
+	configs   map[string]*api.ProviderValidationConfig
+	savedKeys []string
 }
 
 func (f *fakeProviderConfigRepo) GetProviderConfig(provider string) (*api.ProviderValidationConfig, bool, error) {
@@ -26,9 +27,20 @@ func (f *fakeProviderConfigRepo) GetProviderConfig(provider string) (*api.Provid
 	return nil, false, nil
 }
 
+func (f *fakeProviderConfigRepo) SaveProviderConfig(provider string, config *api.ProviderValidationConfig) error {
+	if f.configs == nil {
+		f.configs = map[string]*api.ProviderValidationConfig{}
+	}
+	f.configs[provider] = config
+	f.savedKeys = append(f.savedKeys, provider)
+	return nil
+}
+
 type fakeRulesRepo struct {
-	rules string
-	err   error
+	rules     string
+	err       error
+	saved     string
+	saveCalls int
 }
 
 func (f *fakeRulesRepo) GetSharedAgreementRules() (string, bool, error) {
@@ -38,11 +50,71 @@ func (f *fakeRulesRepo) GetSharedAgreementRules() (string, bool, error) {
 	return f.rules, f.rules != "", nil
 }
 
-func (f *fakeRulesRepo) SaveSharedAgreementRules(text string) error { return nil }
+func (f *fakeRulesRepo) SaveSharedAgreementRules(text string) error {
+	f.saved = text
+	f.saveCalls++
+	return nil
+}
+
+type fakeAgreementRepo struct {
+	agreements  map[string]*api.Agreement
+	deleteCalls []string
+}
+
+func (f *fakeAgreementRepo) GetAgreement(steward string) (*api.Agreement, bool, error) {
+	if a, ok := f.agreements[steward]; ok {
+		return a, true, nil
+	}
+	return nil, false, nil
+}
+func (f *fakeAgreementRepo) SaveAgreement(steward string, agreement *api.Agreement) error {
+	if f.agreements == nil {
+		f.agreements = map[string]*api.Agreement{}
+	}
+	f.agreements[steward] = agreement
+	return nil
+}
+func (f *fakeAgreementRepo) DeleteAgreement(steward string) error {
+	f.deleteCalls = append(f.deleteCalls, steward)
+	delete(f.agreements, steward)
+	return nil
+}
+
+type fakeEflintModelRepo struct {
+	models      map[string]string
+	deleteCalls []string
+}
+
+func (f *fakeEflintModelRepo) GetEflintModel(modelName string) (string, bool, error) {
+	if v, ok := f.models[modelName]; ok {
+		return v, true, nil
+	}
+	return "", false, nil
+}
+func (f *fakeEflintModelRepo) SaveEflintModel(modelName string, modelText string) error {
+	if f.models == nil {
+		f.models = map[string]string{}
+	}
+	f.models[modelName] = modelText
+	return nil
+}
+func (f *fakeEflintModelRepo) DeleteEflintModel(modelName string) error {
+	f.deleteCalls = append(f.deleteCalls, modelName)
+	delete(f.models, modelName)
+	return nil
+}
 
 type fakePhraseProvider struct {
-	name    string
-	phrases map[string]string
+	name              string
+	phrases           map[string]string
+	validateCalls     []validatePersistCall
+	validateErr       error
+	validatePersisted bool
+}
+
+type validatePersistCall struct {
+	steward string
+	payload string
 }
 
 func (p *fakePhraseProvider) Name() string { return p.name }
@@ -53,6 +125,11 @@ func (p *fakePhraseProvider) GetLayer2Phrases(steward string) (string, bool, err
 	return "", false, nil
 }
 func (p *fakePhraseProvider) ValidateAndPersist(ctx context.Context, steward string, payload []byte) error {
+	p.validateCalls = append(p.validateCalls, validatePersistCall{steward: steward, payload: string(payload)})
+	if p.validateErr != nil {
+		return p.validateErr
+	}
+	p.validatePersisted = true
 	return nil
 }
 
@@ -67,6 +144,14 @@ type fakeReasoner struct {
 	introspectCalled bool
 	introspectResult *reasoner.StewardClauses
 	introspectErr    error
+
+	validateModelCalls []string
+	lastValidatedModel string
+	validateModelErr   error
+
+	validateSharedRulesCalls int
+	lastValidatedSharedRules string
+	validateSharedRulesErr   error
 }
 
 func (r *fakeReasoner) EvaluateRequestApproval(ctx context.Context, params reasoner.RequestApprovalParams) (*reasoner.RequestApprovalResult, error) {
@@ -80,8 +165,15 @@ func (r *fakeReasoner) IntrospectStewardClauses(ctx context.Context, params reas
 	return r.introspectResult, r.introspectErr
 }
 func (r *fakeReasoner) IsRunning() bool { return true }
-func (r *fakeReasoner) ValidateAndPersistModel(ctx context.Context, organization string, modelText string) error {
-	return nil
+func (r *fakeReasoner) ValidateAndPersistModel(ctx context.Context, organization string, sharedRulesText string, modelText string) error {
+	r.validateModelCalls = append(r.validateModelCalls, organization)
+	r.lastValidatedModel = modelText
+	return r.validateModelErr
+}
+func (r *fakeReasoner) ValidateSharedRules(ctx context.Context, rulesText string) error {
+	r.validateSharedRulesCalls++
+	r.lastValidatedSharedRules = rulesText
+	return r.validateSharedRulesErr
 }
 func (r *fakeReasoner) Name() string { return "fake" }
 
@@ -340,4 +432,268 @@ func TestValidationService_ResolvesProviderByConfig(t *testing.T) {
 	if got := r.receivedParams.StewardPhrases["Y"]; got != `+agreement("Y").` {
 		t.Errorf("Y should resolve via eflint provider, got %q", got)
 	}
+}
+
+// --- ValidateAndPersistAgreement tests --------------------------------------
+
+// newPersistSvcWithFakes wires the validation service for the persist/format
+// path with stubs that observe the reconciliation side-effects.
+func newPersistSvcWithFakes(t *testing.T, initialStrategy string) (
+	*ValidationService,
+	*fakeProviderConfigRepo,
+	*fakeAgreementRepo,
+	*fakeEflintModelRepo,
+	*fakePhraseProvider,
+	*fakePhraseProvider,
+) {
+	t.Helper()
+	logger, _ := zap.NewDevelopment()
+
+	cfgRepo := &fakeProviderConfigRepo{
+		configs: map[string]*api.ProviderValidationConfig{},
+	}
+	if initialStrategy != "" {
+		cfgRepo.configs["VU"] = &api.ProviderValidationConfig{
+			Name:               "VU",
+			ValidationStrategy: initialStrategy,
+		}
+	}
+	agreementRepo := &fakeAgreementRepo{}
+	modelRepo := &fakeEflintModelRepo{}
+	legacy := &fakePhraseProvider{name: "legacy"}
+	eflintP := &fakePhraseProvider{name: "eflint"}
+
+	svc := NewValidationServiceWithConfig(ValidationServiceConfig{
+		ProviderConfigRepo: cfgRepo,
+		RulesRepo:          &fakeRulesRepo{},
+		AgreementRepo:      agreementRepo,
+		EflintModelRepo:    modelRepo,
+		LegacyProvider:     legacy,
+		EflintProvider:     eflintP,
+		Reasoner:           &fakeReasoner{},
+		AuthGenerator:      fakeAuthGen{},
+		Logger:             logger,
+	})
+
+	return svc, cfgRepo, agreementRepo, modelRepo, legacy, eflintP
+}
+
+func TestValidateAndPersistAgreement_JsonRoutesToLegacy(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, legacy, eflintP := newPersistSvcWithFakes(t, api.ValidationStrategyLegacy)
+
+	payload := []byte(`{"name":"VU"}`)
+	if err := svc.ValidateAndPersistAgreement(context.Background(), "VU", "json", payload); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(legacy.validateCalls) != 1 || legacy.validateCalls[0].steward != "VU" {
+		t.Errorf("expected legacy provider to receive 1 call for VU, got %+v", legacy.validateCalls)
+	}
+	if len(eflintP.validateCalls) != 0 {
+		t.Errorf("expected eflint provider not to be called, got %+v", eflintP.validateCalls)
+	}
+	// Strategy unchanged: no config save, no obsolete-key delete.
+	if len(cfgRepo.savedKeys) != 0 {
+		t.Errorf("expected no provider config save when strategy unchanged, got %+v", cfgRepo.savedKeys)
+	}
+	if len(agreementRepo.deleteCalls) != 0 || len(modelRepo.deleteCalls) != 0 {
+		t.Errorf("expected no obsolete deletes when strategy unchanged, got agreement=%v model=%v",
+			agreementRepo.deleteCalls, modelRepo.deleteCalls)
+	}
+}
+
+func TestValidateAndPersistAgreement_EflintRoutesToEflint(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, legacy, eflintP := newPersistSvcWithFakes(t, api.ValidationStrategyEflint)
+
+	if err := svc.ValidateAndPersistAgreement(context.Background(), "VU", api.ValidationStrategyEflint, []byte(`+agreement("VU").`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(eflintP.validateCalls) != 1 {
+		t.Errorf("expected eflint provider to be called once, got %+v", eflintP.validateCalls)
+	}
+	if len(legacy.validateCalls) != 0 {
+		t.Errorf("expected legacy provider not to be called, got %+v", legacy.validateCalls)
+	}
+	if len(cfgRepo.savedKeys) != 0 {
+		t.Errorf("expected no config save when strategy unchanged, got %+v", cfgRepo.savedKeys)
+	}
+	if len(agreementRepo.deleteCalls) != 0 || len(modelRepo.deleteCalls) != 0 {
+		t.Errorf("unexpected deletes: agreement=%v model=%v", agreementRepo.deleteCalls, modelRepo.deleteCalls)
+	}
+}
+
+func TestValidateAndPersistAgreement_SwitchLegacyToEflint(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, _, _ := newPersistSvcWithFakes(t, api.ValidationStrategyLegacy)
+
+	if err := svc.ValidateAndPersistAgreement(context.Background(), "VU", api.ValidationStrategyEflint, []byte(`+agreement("VU").`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated, ok := cfgRepo.configs["VU"]
+	if !ok || updated.ValidationStrategy != api.ValidationStrategyEflint {
+		t.Errorf("expected provider config for VU to flip to eflint, got %+v", updated)
+	}
+	if !contains(agreementRepo.deleteCalls, "VU") {
+		t.Errorf("expected obsolete legacy JSON to be deleted, got %v", agreementRepo.deleteCalls)
+	}
+	if len(modelRepo.deleteCalls) != 0 {
+		t.Errorf("expected eFLINT model NOT to be deleted on legacy->eflint switch, got %v", modelRepo.deleteCalls)
+	}
+}
+
+func TestValidateAndPersistAgreement_SwitchEflintToLegacy(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, _, _ := newPersistSvcWithFakes(t, api.ValidationStrategyEflint)
+
+	if err := svc.ValidateAndPersistAgreement(context.Background(), "VU", "json", []byte(`{"name":"VU"}`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated, ok := cfgRepo.configs["VU"]
+	if !ok || updated.ValidationStrategy != api.ValidationStrategyLegacy {
+		t.Errorf("expected provider config for VU to flip to legacy, got %+v", updated)
+	}
+	if !contains(modelRepo.deleteCalls, "VU") {
+		t.Errorf("expected obsolete eFLINT model to be deleted, got %v", modelRepo.deleteCalls)
+	}
+	if len(agreementRepo.deleteCalls) != 0 {
+		t.Errorf("expected legacy JSON NOT to be deleted on eflint->legacy switch, got %v", agreementRepo.deleteCalls)
+	}
+}
+
+func TestValidateAndPersistAgreement_NoExistingConfigCreatesOneWithoutDeletes(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, _, _ := newPersistSvcWithFakes(t, "")
+
+	if err := svc.ValidateAndPersistAgreement(context.Background(), "VU", api.ValidationStrategyEflint, []byte(`+agreement("VU").`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated, ok := cfgRepo.configs["VU"]
+	if !ok || updated.ValidationStrategy != api.ValidationStrategyEflint {
+		t.Errorf("expected new provider config with eflint strategy, got %+v", updated)
+	}
+	if len(agreementRepo.deleteCalls) != 0 || len(modelRepo.deleteCalls) != 0 {
+		t.Errorf("expected no deletes when there was no prior config, got agreement=%v model=%v",
+			agreementRepo.deleteCalls, modelRepo.deleteCalls)
+	}
+}
+
+func TestValidateAndPersistAgreement_UnknownFormatRejected(t *testing.T) {
+	svc, _, _, _, legacy, eflintP := newPersistSvcWithFakes(t, "")
+
+	err := svc.ValidateAndPersistAgreement(context.Background(), "VU", "yaml", []byte("name: VU"))
+	if err == nil {
+		t.Fatalf("expected error for unknown format")
+	}
+	if len(legacy.validateCalls)+len(eflintP.validateCalls) != 0 {
+		t.Errorf("no provider should be invoked for unknown format")
+	}
+}
+
+func TestValidateAndPersistAgreement_ProviderErrorIsReturnedAndNoReconciliation(t *testing.T) {
+	svc, cfgRepo, agreementRepo, modelRepo, legacy, _ := newPersistSvcWithFakes(t, api.ValidationStrategyEflint)
+	legacy.validateErr = errInjected{msg: "bad json"}
+
+	err := svc.ValidateAndPersistAgreement(context.Background(), "VU", "json", []byte(`{}`))
+	if err == nil {
+		t.Fatalf("expected error from provider")
+	}
+	if len(cfgRepo.savedKeys) != 0 {
+		t.Errorf("config should not be updated when provider validation failed")
+	}
+	if len(agreementRepo.deleteCalls) != 0 || len(modelRepo.deleteCalls) != 0 {
+		t.Errorf("no deletes expected when validation failed")
+	}
+}
+
+// --- ValidateAndPersistSharedRules tests ------------------------------------
+
+func TestValidateAndPersistSharedRules_PersistsOnSuccess(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	rulesRepo := &fakeRulesRepo{}
+	r := &fakeReasoner{}
+
+	svc := NewValidationServiceWithConfig(ValidationServiceConfig{
+		ProviderConfigRepo: &fakeProviderConfigRepo{},
+		RulesRepo:          rulesRepo,
+		LegacyProvider:     &fakePhraseProvider{name: "legacy"},
+		EflintProvider:     &fakePhraseProvider{name: "eflint"},
+		Reasoner:           r,
+		AuthGenerator:      fakeAuthGen{},
+		Logger:             logger,
+	})
+
+	if err := svc.ValidateAndPersistSharedRules(context.Background(), []byte(`// hello rules`)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.validateSharedRulesCalls != 1 {
+		t.Errorf("expected reasoner.ValidateSharedRules to be called once, got %d", r.validateSharedRulesCalls)
+	}
+	if r.lastValidatedSharedRules != "// hello rules" {
+		t.Errorf("expected rules text to be forwarded to reasoner, got %q", r.lastValidatedSharedRules)
+	}
+	if rulesRepo.saveCalls != 1 || rulesRepo.saved != "// hello rules" {
+		t.Errorf("expected shared rules to be saved exactly once, got calls=%d saved=%q", rulesRepo.saveCalls, rulesRepo.saved)
+	}
+}
+
+func TestValidateAndPersistSharedRules_ReasonerErrorPreventsPersist(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	rulesRepo := &fakeRulesRepo{}
+	r := &fakeReasoner{validateSharedRulesErr: errInjected{msg: "bad rules"}}
+
+	svc := NewValidationServiceWithConfig(ValidationServiceConfig{
+		ProviderConfigRepo: &fakeProviderConfigRepo{},
+		RulesRepo:          rulesRepo,
+		LegacyProvider:     &fakePhraseProvider{name: "legacy"},
+		EflintProvider:     &fakePhraseProvider{name: "eflint"},
+		Reasoner:           r,
+		AuthGenerator:      fakeAuthGen{},
+		Logger:             logger,
+	})
+
+	if err := svc.ValidateAndPersistSharedRules(context.Background(), []byte(`// bad`)); err == nil {
+		t.Fatalf("expected error from reasoner to propagate")
+	}
+	if rulesRepo.saveCalls != 0 {
+		t.Errorf("shared rules must not be persisted when reasoner rejects them")
+	}
+}
+
+func TestValidateAndPersistSharedRules_EmptyPayloadRejected(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	rulesRepo := &fakeRulesRepo{}
+	r := &fakeReasoner{}
+
+	svc := NewValidationServiceWithConfig(ValidationServiceConfig{
+		ProviderConfigRepo: &fakeProviderConfigRepo{},
+		RulesRepo:          rulesRepo,
+		LegacyProvider:     &fakePhraseProvider{name: "legacy"},
+		EflintProvider:     &fakePhraseProvider{name: "eflint"},
+		Reasoner:           r,
+		AuthGenerator:      fakeAuthGen{},
+		Logger:             logger,
+	})
+
+	if err := svc.ValidateAndPersistSharedRules(context.Background(), []byte{}); err == nil {
+		t.Fatalf("expected error for empty payload")
+	}
+	if r.validateSharedRulesCalls != 0 {
+		t.Errorf("reasoner should not be called for empty payload")
+	}
+}
+
+// --- helpers ----------------------------------------------------------------
+
+type errInjected struct{ msg string }
+
+func (e errInjected) Error() string { return e.msg }
+
+func contains(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }

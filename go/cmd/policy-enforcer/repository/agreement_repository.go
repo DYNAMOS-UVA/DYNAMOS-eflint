@@ -13,6 +13,11 @@ type AgreementRepository interface {
 
 	// SaveAgreement saves an agreement for a specific data steward.
 	SaveAgreement(steward string, agreement *api.Agreement) error
+
+	// DeleteAgreement removes the legacy JSON agreement for a specific data
+	// steward. Used when reconciling a format switch (eFLINT replaces legacy).
+	// Deleting a non-existent key is not an error.
+	DeleteAgreement(steward string) error
 }
 
 // UserRelation represents the relationship between a user and a data provider.
