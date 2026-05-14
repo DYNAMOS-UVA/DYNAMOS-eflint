@@ -1,17 +1,20 @@
 package reasoner
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/eflint"
 )
 
 func TestQuoteEflintLiteral(t *testing.T) {
 	cases := map[string]string{
-		`Niels`: `"Niels"`,
+		`Niels`:  `"Niels"`,
 		`Jorrit`: `"Jorrit"`,
-		`a"b`:  `"a\"b"`,
-		`a\b`:  `"a\\b"`,
+		`a"b`:    `"a\"b"`,
+		`a\b`:    `"a\\b"`,
 	}
 	for in, want := range cases {
 		if got := quoteEflintLiteral(in); got != want {
@@ -33,168 +36,72 @@ func TestBuildLayer3Phrases(t *testing.T) {
 	}
 }
 
-func TestIntersectPreservingOrder(t *testing.T) {
-	cases := []struct {
-		name string
-		a, b []string
-		want []string
-	}{
-		{name: "basic", a: []string{"x", "y", "z"}, b: []string{"y", "z"}, want: []string{"y", "z"}},
-		{name: "preserve a order", a: []string{"computeToData", "dataThroughTtp"}, b: []string{"dataThroughTtp", "computeToData"}, want: []string{"computeToData", "dataThroughTtp"}},
-		{name: "no overlap", a: []string{"x"}, b: []string{"y"}, want: nil},
-		{name: "empty a", a: nil, b: []string{"y"}, want: nil},
-		{name: "empty b", a: []string{"x"}, b: nil, want: nil},
-		{name: "duplicates dedup", a: []string{"x", "x", "y"}, b: []string{"x", "y"}, want: []string{"x", "y"}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := intersectPreservingOrder(c.a, c.b)
-			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("intersectPreservingOrder(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
-			}
-		})
-	}
+// stubPhrasesSender records the phrase it was called with and returns a
+// canned response/error. It implements the phrasesSender interface used by
+// queryInstances.
+type stubPhrasesSender struct {
+	gotPhrase string
+	resp      *eflint.PhrasesResponse
+	err       error
 }
 
-func TestFilterTernary(t *testing.T) {
-	facts := []eflintFact{
-		{
-			FactType: "relation-allows-archetype",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "Niels"},
-				{FactType: "data-steward", Value: "VU"},
-				{FactType: "archetype", Value: "computeToData"},
-			},
-		},
-		{
-			FactType: "relation-allows-archetype",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "Niels"},
-				{FactType: "data-steward", Value: "VU"},
-				{FactType: "archetype", Value: "dataThroughTtp"},
-			},
-		},
-		{
-			// Different requester — must be filtered out.
-			FactType: "relation-allows-archetype",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "Bob"},
-				{FactType: "data-steward", Value: "VU"},
-				{FactType: "archetype", Value: "computeToData"},
-			},
-		},
-		{
-			// Different fact-type — must be filtered out.
-			FactType: "relation-allows-compute-provider",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "Niels"},
-				{FactType: "data-steward", Value: "VU"},
-				{FactType: "compute-provider", Value: "SURF"},
-			},
-		},
-	}
-
-	got := filterTernary(facts, "relation-allows-archetype",
-		"requester", "Niels",
-		"data-steward", "VU",
-		"archetype")
-
-	want := []string{"computeToData", "dataThroughTtp"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("filterTernary mismatch: got %v, want %v", got, want)
-	}
+func (s *stubPhrasesSender) SendPhrases(text string) (*eflint.PhrasesResponse, error) {
+	s.gotPhrase = text
+	return s.resp, s.err
 }
 
-func TestRequestersWithRelationTo(t *testing.T) {
-	facts := []eflintFact{
-		{
-			FactType: "has-relation",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "alice@x"},
-				{FactType: "data-steward", Value: "VU"},
+func TestQueryInstances(t *testing.T) {
+	t.Run("extracts values from inst-query-results", func(t *testing.T) {
+		stub := &stubPhrasesSender{
+			resp: &eflint.PhrasesResponse{
+				InstQueryResults: []eflint.InstQueryResult{
+					{FactType: "archetype", TaggedType: "string", Value: "DataThroughTtp"},
+					{FactType: "archetype", TaggedType: "string", Value: "ComputeToData"},
+				},
 			},
-		},
-		{
-			FactType: "has-relation",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "bob@x"},
-				{FactType: "data-steward", Value: "VU"},
-			},
-		},
-		{
-			// Different steward — must be filtered out.
-			FactType: "has-relation",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "carol@x"},
-				{FactType: "data-steward", Value: "UVA"},
-			},
-		},
-		{
-			// Duplicate of alice — must be deduplicated while preserving order.
-			FactType: "has-relation",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "requester", Value: "alice@x"},
-				{FactType: "data-steward", Value: "VU"},
-			},
-		},
-	}
+		}
+		phrase := `?-archetype When valid-archetype("Niels", "UVA", archetype).`
 
-	got := requestersWithRelationTo(facts, "VU")
-	want := []string{"alice@x", "bob@x"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("requestersWithRelationTo mismatch: got %v, want %v", got, want)
-	}
-}
+		got, err := queryInstances(stub, phrase)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if stub.gotPhrase != phrase {
+			t.Errorf("phrase forwarded incorrectly: got %q, want %q", stub.gotPhrase, phrase)
+		}
+		want := []string{"DataThroughTtp", "ComputeToData"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("values mismatch: got %v, want %v", got, want)
+		}
+	})
 
-func TestFilterBinary(t *testing.T) {
-	facts := []eflintFact{
-		{
-			FactType: "steward-supports-archetype",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "data-steward", Value: "VU"},
-				{FactType: "archetype", Value: "computeToData"},
-			},
-		},
-		{
-			FactType: "steward-supports-archetype",
-			Arguments: []struct {
-				FactType string `json:"fact-type"`
-				Value    string `json:"value"`
-			}{
-				{FactType: "data-steward", Value: "UVA"},
-				{FactType: "archetype", Value: "reproducableScience"},
-			},
-		},
-	}
-	got := filterBinary(facts, "steward-supports-archetype", "data-steward", "VU", "archetype")
-	if !reflect.DeepEqual(got, []string{"computeToData"}) {
-		t.Errorf("filterBinary mismatch: got %v, want [computeToData]", got)
-	}
+	t.Run("returns empty slice when no matches", func(t *testing.T) {
+		stub := &stubPhrasesSender{
+			resp: &eflint.PhrasesResponse{InstQueryResults: nil},
+		}
+		got, err := queryInstances(stub, "?-archetype When valid-archetype(...)")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("expected empty slice, got %v", got)
+		}
+	})
+
+	t.Run("propagates SendPhrases error", func(t *testing.T) {
+		sentinel := errors.New("boom")
+		stub := &stubPhrasesSender{err: sentinel}
+		_, err := queryInstances(stub, "?-archetype When ...")
+		if !errors.Is(err, sentinel) {
+			t.Errorf("expected wrapped sentinel error, got %v", err)
+		}
+	})
+
+	t.Run("errors on nil response", func(t *testing.T) {
+		stub := &stubPhrasesSender{resp: nil, err: nil}
+		_, err := queryInstances(stub, "?-archetype When ...")
+		if err == nil {
+			t.Errorf("expected error for nil response, got nil")
+		}
+	})
 }

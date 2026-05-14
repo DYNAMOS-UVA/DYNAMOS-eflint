@@ -2,7 +2,6 @@ package reasoner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,38 +11,64 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Fact response helpers
+// Instance query helper
 // -----------------------------------------------------------------------------
 
-// eflintFact represents a single fact instance returned by the eFLINT
-// `facts` command. The reasoner uses these to derive valid-archetype /
-// valid-compute-provider sets without needing to parse the generative-query
-// response shape (the `facts` command already returns every grounded fact).
-type eflintFact struct {
-	FactType   string `json:"fact-type"`
-	TaggedType string `json:"tagged-type"`
-	Arguments  []struct {
-		FactType string `json:"fact-type"`
-		Value    string `json:"value"`
-	} `json:"arguments"`
+// phrasesSender is the narrow interface used by queryInstances and queryHolds.
+// *eflint.Manager satisfies it; tests can pass a stub.
+type phrasesSender interface {
+	SendPhrases(text string) (*eflint.PhrasesResponse, error)
 }
 
-// fetchFacts sends the "facts" command to the given manager and parses the
-// response into a slice of eflintFact values.
-func fetchFacts(mgr *eflint.Manager) ([]eflintFact, error) {
-	response, err := mgr.SendCommand(`{"command": "facts"}`)
+// queryInstances sends a single generative eFLINT phrase (`?-factType When …`)
+// to the reasoner and returns the matched fact values from
+// `inst-query-results`. This lets the reasoner do the filtering / intersection
+// directly, instead of dumping every grounded fact and filtering in Go.
+func queryInstances(s phrasesSender, phrase string) ([]string, error) {
+	resp, err := s.SendPhrases(phrase)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get facts from eFLINT: %w", err)
+		return nil, fmt.Errorf("instance query %q failed: %w", phrase, err)
 	}
+	if resp == nil {
+		return nil, fmt.Errorf("nil response for instance query %q", phrase)
+	}
+	out := make([]string, 0, len(resp.InstQueryResults))
+	for _, res := range resp.InstQueryResults {
+		out = append(out, res.Value)
+	}
+	return out, nil
+}
 
-	var factsResponse struct {
-		Values []eflintFact `json:"values"`
+// loggedQueryInstances wraps queryInstances with DEBUG-level logging of
+// the phrase sent, the raw inst-query-results from the server, and the
+// extracted values. Use this instead of queryInstances wherever the
+// EflintReasoner has a logger available.
+func (r *EflintReasoner) loggedQueryInstances(s phrasesSender, phrase string) ([]string, error) {
+	resp, err := s.SendPhrases(phrase)
+	if err != nil {
+		r.logger.Debug("eflint query failed",
+			zap.String("phrase", phrase),
+			zap.Error(err),
+		)
+		return nil, fmt.Errorf("instance query %q failed: %w", phrase, err)
 	}
-	if err := json.Unmarshal([]byte(response), &factsResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse facts response: %w", err)
+	if resp == nil {
+		r.logger.Debug("eflint query nil response", zap.String("phrase", phrase))
+		return nil, fmt.Errorf("nil response for instance query %q", phrase)
 	}
-
-	return factsResponse.Values, nil
+	r.logger.Debug("eflint query raw inst-query-results",
+		zap.String("phrase", phrase),
+		zap.Any("inst_query_results", resp.InstQueryResults),
+	)
+	out := make([]string, 0, len(resp.InstQueryResults))
+	for _, res := range resp.InstQueryResults {
+		out = append(out, res.Value)
+	}
+	r.logger.Debug("eflint query extracted values",
+		zap.String("phrase", phrase),
+		zap.Strings("values", out),
+	)
+	return out, nil
 }
 
 // EvaluateRequestApproval implements the layered request-approval evaluation
@@ -163,25 +188,26 @@ func (r *EflintReasoner) EvaluateRequestApproval(ctx context.Context, params Req
 }
 
 // collectValidIntersections derives the matched archetypes / compute providers
-// for (requester, steward) by intersecting the relation-allows-* base facts
-// with the steward-supports-* base facts. The eFLINT spec defines
-// valid-archetype / valid-compute-provider as exactly that conjunction
-// (see Layer-2 shared rules), so this Go-side intersection is consistent with
-// the reasoner's derivation while avoiding the need to parse the generative
-// query response shape.
+// for (requester, steward) by asking the reasoner directly for the derived
+// valid-archetype / valid-compute-provider instances. The Layer-2 shared rules
+// define these as the intersection of relation-allows-* and steward-supports-*,
+// so a single generative query per dimension returns the already-intersected
+// result set.
 func (r *EflintReasoner) collectValidIntersections(mgr *eflint.Manager, requester, steward string) ([]string, []string, error) {
-	facts, err := fetchFacts(mgr)
+	reqLit := quoteEflintLiteral(requester)
+	stLit := quoteEflintLiteral(steward)
+
+	matchedArchetypes, err := r.loggedQueryInstances(mgr,
+		fmt.Sprintf("?-archetype When valid-archetype(%s, %s, archetype).", reqLit, stLit))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	relationArchetypes := filterTernary(facts, "relation-allows-archetype", "requester", requester, "data-steward", steward, "archetype")
-	stewardArchetypes := filterBinary(facts, "steward-supports-archetype", "data-steward", steward, "archetype")
-	matchedArchetypes := intersectPreservingOrder(relationArchetypes, stewardArchetypes)
-
-	relationComputeProvs := filterTernary(facts, "relation-allows-compute-provider", "requester", requester, "data-steward", steward, "compute-provider")
-	stewardComputeProvs := filterBinary(facts, "steward-supports-compute-provider", "data-steward", steward, "compute-provider")
-	matchedComputeProvs := intersectPreservingOrder(relationComputeProvs, stewardComputeProvs)
+	matchedComputeProvs, err := r.loggedQueryInstances(mgr,
+		fmt.Sprintf("?-compute-provider When valid-compute-provider(%s, %s, compute-provider).", reqLit, stLit))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return matchedArchetypes, matchedComputeProvs, nil
 }
@@ -205,6 +231,25 @@ func queryHolds(mgr *eflint.Manager, factExpression string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// buildRequesterPhrases produces a minimal phrase block that grounds the
+// given requester atoms (`+requester(X).`) without asserting any
+// requested-steward or firing any Acts. Used by IntrospectStewardClauses to
+// enable generative requester queries in a Layer-2-only session.
+func buildRequesterPhrases(requesters []string) string {
+	var b strings.Builder
+	seen := map[string]struct{}{}
+	for _, req := range requesters {
+		if _, ok := seen[req]; ok {
+			continue
+		}
+		seen[req] = struct{}{}
+		b.WriteString("+requester(")
+		b.WriteString(quoteEflintLiteral(req))
+		b.WriteString(").\n")
+	}
+	return b.String()
 }
 
 // buildLayer3Phrases produces the Layer-3 request-fact block for one
@@ -237,47 +282,12 @@ func quoteEflintLiteral(value string) string {
 	return `"` + escaped + `"`
 }
 
-// filterBinary filters `factType(arg0FactType=arg0Value, valueFactType=*)`
-// instances and returns the third-position values.
-func filterBinary(facts []eflintFact, factType, arg0FactType, arg0Value, valueFactType string) []string {
-	var values []string
-	for _, fact := range facts {
-		if fact.FactType != factType || len(fact.Arguments) < 2 {
-			continue
-		}
-		if fact.Arguments[0].FactType == arg0FactType &&
-			fact.Arguments[0].Value == arg0Value &&
-			fact.Arguments[1].FactType == valueFactType {
-			values = append(values, fact.Arguments[1].Value)
-		}
-	}
-	return values
-}
-
-// filterTernary filters `factType(arg0=v0, arg1=v1, valueFactType=*)`
-// instances and returns the third-position values.
-func filterTernary(facts []eflintFact, factType, arg0FactType, arg0Value, arg1FactType, arg1Value, valueFactType string) []string {
-	var values []string
-	for _, fact := range facts {
-		if fact.FactType != factType || len(fact.Arguments) < 3 {
-			continue
-		}
-		if fact.Arguments[0].FactType == arg0FactType &&
-			fact.Arguments[0].Value == arg0Value &&
-			fact.Arguments[1].FactType == arg1FactType &&
-			fact.Arguments[1].Value == arg1Value &&
-			fact.Arguments[2].FactType == valueFactType {
-			values = append(values, fact.Arguments[2].Value)
-		}
-	}
-	return values
-}
-
 // IntrospectStewardClauses implements the read-only Layer 1 + Layer 2
 // loader used by the policy-enforcer HTTP API. It pushes the shared rules
-// and the steward's per-steward phrases onto a clean pool instance, asks
-// for the full fact set, and groups the relation-allows-* facts per
-// requester. No Layer 3 is pushed and no Acts are fired.
+// and the steward's per-steward phrases onto a clean pool instance and uses
+// targeted generative queries (`?-factType When …`) to materialise the
+// steward-supports-* and relation-allows-* facts per requester. No Layer 3
+// is pushed and no Acts are fired.
 func (r *EflintReasoner) IntrospectStewardClauses(ctx context.Context, params IntrospectStewardClausesParams) (*StewardClauses, error) {
 	if strings.TrimSpace(params.Steward) == "" {
 		return nil, fmt.Errorf("steward is required")
@@ -304,86 +314,68 @@ func (r *EflintReasoner) IntrospectStewardClauses(ctx context.Context, params In
 		return nil, fmt.Errorf("failed to load Layer-2 phrases for %s: %w", params.Steward, err)
 	}
 
-	facts, err := fetchFacts(mgr)
-	if err != nil {
-		return nil, err
+	// Ground the provided requester atoms so that generative queries of the
+	// form `?-requester When has-relation(requester, steward).` can enumerate
+	// them. These are the only Layer-3 facts pushed here; no requested-steward
+	// facts and no Acts are fired, keeping the session read-only.
+	if len(params.Requesters) > 0 {
+		requesterPhrases := buildRequesterPhrases(params.Requesters)
+		if _, err := mgr.SendPhrases(requesterPhrases); err != nil {
+			return nil, fmt.Errorf("failed to ground requester facts: %w", err)
+		}
 	}
 
+	stLit := quoteEflintLiteral(params.Steward)
 	out := &StewardClauses{Steward: params.Steward}
-	out.SupportedArchetypes = filterBinary(facts, "steward-supports-archetype",
-		"data-steward", params.Steward, "archetype")
-	out.SupportedComputeProviders = filterBinary(facts, "steward-supports-compute-provider",
-		"data-steward", params.Steward, "compute-provider")
 
-	requesters := requestersWithRelationTo(facts, params.Steward)
+	out.SupportedArchetypes, err = r.loggedQueryInstances(mgr,
+		fmt.Sprintf("?-archetype When steward-supports-archetype(%s, archetype).", stLit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query steward-supports-archetype: %w", err)
+	}
+	out.SupportedComputeProviders, err = r.loggedQueryInstances(mgr,
+		fmt.Sprintf("?-compute-provider When steward-supports-compute-provider(%s, compute-provider).", stLit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query steward-supports-compute-provider: %w", err)
+	}
+
+	// Enumerate requesters that have a relation to this steward. Each
+	// agreement file must explicitly ground requester(X) instances so that
+	// this generative query can enumerate them — exactly as archetype,
+	// dataset, and compute-provider instances are grounded.
+	requesters, err := r.loggedQueryInstances(mgr,
+		fmt.Sprintf("?-requester When has-relation(requester, %s).", stLit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query requesters with has-relation to %s: %w", params.Steward, err)
+	}
+
 	for _, requester := range requesters {
-		clauses := RequesterClauses{
-			Requester: requester,
-			RequestTypes: filterTernary(facts, "relation-allows-request-type",
-				"requester", requester, "data-steward", params.Steward, "request-type"),
-			Datasets: filterTernary(facts, "relation-allows-dataset",
-				"requester", requester, "data-steward", params.Steward, "dataset"),
-			Archetypes: filterTernary(facts, "relation-allows-archetype",
-				"requester", requester, "data-steward", params.Steward, "archetype"),
-			ComputeProviders: filterTernary(facts, "relation-allows-compute-provider",
-				"requester", requester, "data-steward", params.Steward, "compute-provider"),
+		reqLit := quoteEflintLiteral(requester)
+		clauses := RequesterClauses{Requester: requester}
+
+		clauses.RequestTypes, err = r.loggedQueryInstances(mgr,
+			fmt.Sprintf("?-request-type When relation-allows-request-type(%s, %s, request-type).", reqLit, stLit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to query relation-allows-request-type for %s: %w", requester, err)
 		}
+		clauses.Datasets, err = r.loggedQueryInstances(mgr,
+			fmt.Sprintf("?-dataset When relation-allows-dataset(%s, %s, dataset).", reqLit, stLit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to query relation-allows-dataset for %s: %w", requester, err)
+		}
+		clauses.Archetypes, err = r.loggedQueryInstances(mgr,
+			fmt.Sprintf("?-archetype When relation-allows-archetype(%s, %s, archetype).", reqLit, stLit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to query relation-allows-archetype for %s: %w", requester, err)
+		}
+		clauses.ComputeProviders, err = r.loggedQueryInstances(mgr,
+			fmt.Sprintf("?-compute-provider When relation-allows-compute-provider(%s, %s, compute-provider).", reqLit, stLit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to query relation-allows-compute-provider for %s: %w", requester, err)
+		}
+
 		out.Relations = append(out.Relations, clauses)
 	}
 
 	return out, nil
-}
-
-// requestersWithRelationTo enumerates the distinct requester values appearing
-// in `has-relation(requester, steward)` facts for the given steward, in the
-// order they first occur (so the API output is deterministic for a given
-// agreement file).
-func requestersWithRelationTo(facts []eflintFact, steward string) []string {
-	seen := map[string]struct{}{}
-	var out []string
-	for _, fact := range facts {
-		if fact.FactType != "has-relation" || len(fact.Arguments) < 2 {
-			continue
-		}
-		if fact.Arguments[0].FactType != "requester" {
-			continue
-		}
-		if fact.Arguments[1].FactType != "data-steward" || fact.Arguments[1].Value != steward {
-			continue
-		}
-		req := fact.Arguments[0].Value
-		if _, dup := seen[req]; dup {
-			continue
-		}
-		seen[req] = struct{}{}
-		out = append(out, req)
-	}
-	return out
-}
-
-// intersectPreservingOrder returns the intersection of a and b in the order
-// they first appear in a, with duplicates removed. Returns nil (not an empty
-// slice) when there is no overlap so the result is comparable to nil and
-// safely omitted from JSON / wire-format encodings that use omitempty.
-func intersectPreservingOrder(a, b []string) []string {
-	if len(a) == 0 || len(b) == 0 {
-		return nil
-	}
-	bSet := make(map[string]struct{}, len(b))
-	for _, v := range b {
-		bSet[v] = struct{}{}
-	}
-	seen := make(map[string]struct{}, len(a))
-	var out []string
-	for _, v := range a {
-		if _, ok := bSet[v]; !ok {
-			continue
-		}
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
 }

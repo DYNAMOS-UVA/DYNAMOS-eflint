@@ -360,6 +360,8 @@ func TestValidationService_GetAllowedClauses_ResolvesProviderAndPassesPhrases(t 
 
 func TestValidationService_GetAllowedClauses_FiltersByRequester(t *testing.T) {
 	svc, r, _, _ := newSvcWithFakes(t)
+	// The stub reasoner returns both relations regardless of Requesters; the
+	// service must post-filter as a safety net.
 	r.introspectResult = &reasoner.StewardClauses{
 		Steward: "VU",
 		Relations: []reasoner.RequesterClauses{
@@ -374,6 +376,11 @@ func TestValidationService_GetAllowedClauses_FiltersByRequester(t *testing.T) {
 	}
 	if len(out.Relations) != 1 || out.Relations[0].Requester != "bob@x" {
 		t.Errorf("expected only bob@x's relation, got %+v", out.Relations)
+	}
+	// Verify the service forwarded the requester to the reasoner so it can
+	// ground the requester atom before querying.
+	if len(r.introspectParams.Requesters) != 1 || r.introspectParams.Requesters[0] != "bob@x" {
+		t.Errorf("expected Requesters=[bob@x] forwarded to reasoner, got %v", r.introspectParams.Requesters)
 	}
 }
 

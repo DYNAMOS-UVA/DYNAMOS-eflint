@@ -45,10 +45,18 @@ type RequestApprovalResult struct {
 // (shared + per-steward) only, with no Layer 3, so the resulting facts can be
 // inspected. It is intended for policy-engineering use (e.g. an HTTP API that
 // answers "what does this steward's agreement permit?").
+//
+// Requesters lists the requester identities to assert as minimal Layer-3 facts
+// (`+requester(X).`) before running the introspect queries. This is required
+// because eFLINT generative queries enumerate only explicitly grounded fact
+// instances, and requester atoms are not present in a Layer-2-only session.
+// Provide every requester whose relation clauses should appear in the result;
+// leave empty to return only steward-level supported facts (no relations).
 type IntrospectStewardClausesParams struct {
-	Steward        string // The data steward being introspected
-	SharedRules    string // Layer 2 shared agreement rules (may be empty)
-	StewardPhrases string // Layer 2 per-steward phrases (must be non-empty)
+	Steward        string   // The data steward being introspected
+	SharedRules    string   // Layer 2 shared agreement rules (may be empty)
+	StewardPhrases string   // Layer 2 per-steward phrases (must be non-empty)
+	Requesters     []string // Requesters to ground before querying (see above)
 }
 
 // RequesterClauses captures the "what is this requester allowed to do at this

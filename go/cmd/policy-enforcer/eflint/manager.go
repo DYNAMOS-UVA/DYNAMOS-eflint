@@ -367,11 +367,22 @@ func (m *Manager) SendPhrases(text string) (*PhrasesResponse, error) {
 	return &phrasesResp, nil
 }
 
+// InstQueryResult is a single result row from a generative (?-) instance
+// query. The eFLINT server returns one of these per matched fact instance in
+// the `inst-query-results` array.
+type InstQueryResult struct {
+	FactType   string `json:"fact-type"`
+	TaggedType string `json:"tagged-type"`
+	Textual    string `json:"textual"`
+	Value      string `json:"value"`
+}
+
 // PhrasesResponse represents the response from an eFLINT "phrases" command.
 type PhrasesResponse struct {
-	Response     string   `json:"response"`
-	QueryResults []string `json:"query-results"`
-	Errors       []struct {
+	Response         string            `json:"response"`
+	QueryResults     []string          `json:"query-results"`
+	InstQueryResults []InstQueryResult `json:"inst-query-results"`
+	Errors           []struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"errors"`

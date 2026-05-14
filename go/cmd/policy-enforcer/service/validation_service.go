@@ -473,15 +473,25 @@ func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, ste
 		return nil, err
 	}
 
-	clauses, err := s.reasoner.IntrospectStewardClauses(ctx, reasoner.IntrospectStewardClausesParams{
+	params := reasoner.IntrospectStewardClausesParams{
 		Steward:        steward,
 		SharedRules:    sharedRules,
 		StewardPhrases: phrases,
-	})
+	}
+	if requester != "" {
+		params.Requesters = []string{requester}
+	}
+
+	clauses, err := s.reasoner.IntrospectStewardClauses(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("introspecting steward clauses: %w", err)
 	}
 
+	// When a specific requester was requested, filter the relations down to
+	// just that requester as a safety net (the reasoner already limits results
+	// by grounding only the requested requester atom, but this guard handles
+	// any stub or legacy reasoner implementation that ignores the Requesters
+	// field).
 	if requester != "" && clauses != nil {
 		filtered := make([]reasoner.RequesterClauses, 0, 1)
 		for _, rel := range clauses.Relations {
