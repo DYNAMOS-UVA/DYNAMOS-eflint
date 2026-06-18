@@ -4,7 +4,7 @@ set -e
 
 # Change this to the path of the DYNAMOS repository on your disk
 echo "Setting up paths..."
-DYNAMOS_ROOT="/Users/nielsarts/projects/school/masterproject/DYNAMOS"
+DYNAMOS_ROOT="/mnt/c/Users/alkou/Documents/GitHub/DYNAMOS-eflint-UVA"
 
 # Charts
 charts_path="${DYNAMOS_ROOT}/charts"
@@ -69,8 +69,18 @@ helm upgrade -i -f "${core_chart}/prometheus-values.yaml" prometheus prometheus-
 echo "Patch Prometheus to fix node exporter..."
 kubectl patch ds prometheus-prometheus-node-exporter --type "json" -p '[{"op": "remove", "path" : "/spec/template/spec/containers/0/volumeMounts/2/mountPropagation"}]'
 
+
+# Remove the ingress namespace if it already exists, to ensure a clean install
+if kubectl get namespace ingress >/dev/null 2>&1; then
+    echo "Namespace ingress already exists, deleting it before reinstall..."
+    if helm status nginx -n ingress >/dev/null 2>&1; then
+        helm uninstall nginx -n ingress || true
+    fi
+    kubectl delete namespace ingress --wait=true
+fi
+
 echo "Installing NGINX..."
-helm install -f "${core_chart}/ingress-values.yaml" nginx oci://ghcr.io/nginxinc/charts/nginx-ingress -n ingress --version 0.18.0
+helm install -f "${core_chart}/ingress-values.yaml" nginx oci://ghcr.io/nginxinc/charts/nginx-ingress -n ingress --create-namespace --version 0.18.0
 
 echo "Installing DYNAMOS core..."
 helm upgrade -i -f ${core_chart}/values.yaml core ${core_chart} --set hostPath=${HOME}
