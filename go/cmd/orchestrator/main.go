@@ -18,15 +18,15 @@ import (
 )
 
 var (
-	logger                             = lib.InitLogger(logLevel)
-	etcdClient        *clientv3.Client = etcd.GetEtcdClient(etcdEndpoints)
-	conn              *grpc.ClientConn
-	receiveMutex      = &sync.Mutex{}
-	policyUpdateMutex = &sync.Mutex{}
-	policyUpdateMap   = make(map[string]map[string]*pb.CompositionRequest)
+	logger                                = lib.InitLogger(logLevel)
+	etcdClient           *clientv3.Client = etcd.GetEtcdClient(etcdEndpoints)
+	conn                 *grpc.ClientConn
+	receiveMutex         = &sync.Mutex{}
+	policyUpdateMutex    = &sync.Mutex{}
+	policyUpdateMap      = make(map[string]map[string]*pb.CompositionRequest)
 	agreementUpdateMutex = &sync.Mutex{}
 	agreementUpdateMap   = make(map[string]chan *pb.PolicyUpdate)
-	c                 pb.RabbitMQClient
+	c                    pb.RabbitMQClient
 )
 
 type validation struct {
@@ -82,6 +82,8 @@ func main() {
 
 	apiMux.Handle("/policyEnforcer", &ochttp.Handler{Handler: agreementsHandler(etcdClient, "/policyEnforcer")})
 	apiMux.Handle("/policyEnforcer/", &ochttp.Handler{Handler: agreementsHandler(etcdClient, "/policyEnforcer")})
+	apiMux.Handle("/policyEnforcer/eflintModels", &ochttp.Handler{Handler: http.HandlerFunc(handlePostEflintModel)})
+	apiMux.Handle("/policyEnforcer/eflintModels/", &ochttp.Handler{Handler: http.HandlerFunc(handlePostEflintModel)})
 
 	logger.Info(apiVersion) // prints /api/v1
 

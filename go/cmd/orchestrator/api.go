@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -266,4 +268,121 @@ func updateEtc() http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Updated all config"))
 	}
+}
+
+// handlePostEflintModel provides a compatibility upload route for older
+// workflows that POST a .eflint file to /policyEnforcer/eflintModels.
+// Internally this is mapped to the current agreementUpdate flow.
+func handlePostEflintModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	steward, payload, err := parseEflintModelUpload(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	correlationId := uuid.New().String()
+	policyUpdate := &pb.PolicyUpdate{
+		Type: "agreementUpdate",
+		RequestMetadata: &pb.RequestMetadata{
+			DestinationQueue: "policyEnforcer-in",
+			CorrelationId:    correlationId,
+		},
+		AgreementName:    steward,
+		AgreementPayload: payload,
+		Format:           api.ValidationStrategyEflint,
+	}
+
+	res, ok := awaitPolicyEnforcerAck(w, r, policyUpdate, correlationId)
+	if !ok {
+		return
+	}
+
+	if res.ValidationResponse != nil && !res.ValidationResponse.RequestApproved {
+		http.Error(w, "Policy update rejected by Policy Enforcer", http.StatusBadRequest)
+		return
+	}
+
+	go checkJobs(steward)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func parseEflintModelUpload(r *http.Request) (string, []byte, error) {
+	contentType := r.Header.Get("Content-Type")
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+
+	if mediaType == "multipart/form-data" {
+		if err := r.ParseMultipartForm(2 << 20); err != nil {
+			return "", nil, fmt.Errorf("invalid multipart form")
+		}
+
+		file, fileHeader, err := r.FormFile("file")
+		if err != nil {
+			return "", nil, fmt.Errorf("missing file form field 'file'")
+		}
+		defer file.Close()
+
+		payload, err := io.ReadAll(file)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to read uploaded file")
+		}
+		if len(payload) == 0 {
+			return "", nil, fmt.Errorf("empty model payload")
+		}
+
+		steward, err := stewardFromEflintFilename(fileHeader.Filename)
+		if err != nil {
+			return "", nil, err
+		}
+
+		return steward, payload, nil
+	}
+
+	fileName := strings.TrimSpace(r.URL.Query().Get("filename"))
+	if fileName == "" {
+		return "", nil, fmt.Errorf("filename query parameter is required for non-multipart payloads")
+	}
+
+	steward, err := stewardFromEflintFilename(fileName)
+	if err != nil {
+		return "", nil, err
+	}
+
+	payload, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read request body")
+	}
+	if len(payload) == 0 {
+		return "", nil, fmt.Errorf("empty model payload")
+	}
+
+	return steward, payload, nil
+}
+
+func stewardFromEflintFilename(fileName string) (string, error) {
+	base := filepath.Base(strings.TrimSpace(fileName))
+	if base == "" || base == "." {
+		return "", fmt.Errorf("invalid filename")
+	}
+
+	if filepath.Ext(base) != ".eflint" {
+		return "", fmt.Errorf("file must have .eflint extension")
+	}
+
+	steward := strings.TrimSuffix(base, ".eflint")
+	if steward == "" {
+		return "", fmt.Errorf("invalid model name")
+	}
+
+	if strings.ContainsAny(steward, `/\\`) {
+		return "", fmt.Errorf("invalid model name")
+	}
+
+	return steward, nil
 }
