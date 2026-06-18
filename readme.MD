@@ -34,6 +34,7 @@ The Fabric-CloudLab profile can be cloned and adapted from the [dynamos-cluster]
   - [12. Add DYNAMOS env vars and helper functions to shell](#12-add-dynamos-env-vars-and-helper-functions-to-shell)
 - [Example](#example)
   - [13. Example Request](#13-example-request)
+    - [13.1 Policy Enforcer validation (WSL)](#131-policy-enforcer-validation-wsl)
 - [Troubleshooting](#troubleshooting)
   - [14. Services crash because the connection to RabbitMQ does not work](#14-services-crash-because-the-connection-to-rabbitmq-does-not-work)
 
@@ -362,6 +363,25 @@ curl --location 'http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requ
     }
 }'
 ```
+
+### 13.1 Policy Enforcer validation (WSL)
+
+When testing the Policy Enforcer directly from WSL (for example with a port-forward on `18082:8080`), use this request shape:
+
+```bash
+curl -i \
+  -X POST http://127.0.0.1:18082/api/v1/policy-enforcer/validate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user": {
+      "id": "1",
+      "user_name": "jorrit.stutterheim@cloudnation.nl"
+    },
+    "data_providers": ["VU"]
+  }'
+```
+
+Note: `user.user_name` and `data_providers` are required by this endpoint.
 
 # Troubleshooting
 
