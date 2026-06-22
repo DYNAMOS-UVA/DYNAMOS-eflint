@@ -40,3 +40,10 @@ datasets/*.csv
 *.drawio.bkp
 *.drawio.dtmp
 eflint-states/
+
+# Protobuf
+# Keep source schemas in repo (proto-files/*.proto), ignore generated code.
+go/pkg/proto/*.pb.go
+go/pkg/proto/*_grpc.pb.go
+python/dynamos-python-lib/protofiles/*_pb2.py
+python/dynamos-python-lib/protofiles/*_pb2_grpc.py
