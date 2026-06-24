@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/reasoner"
 	"github.com/Jorrit05/DYNAMOS/cmd/policy-enforcer/repository"
@@ -10,6 +11,17 @@ import (
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
 	"go.uber.org/zap"
 )
+
+// AllowedClausesTiming contains per-stage latency measurements for
+// GetAllowedClausesForSteward. Durations are expressed in milliseconds.
+type AllowedClausesTiming struct {
+	ResolveProviderMs    int64
+	LoadStewardPhrasesMs int64
+	LoadSharedRulesMs    int64
+	ReasonerIntrospectMs int64
+	FilterRelationsMs    int64
+	ServiceTotalMs       int64
+}
 
 // ValidationService orchestrates request-approval validation under the
 // layered eFLINT design.
@@ -450,27 +462,52 @@ func (s *ValidationService) ValidateAndPersistSharedRules(ctx context.Context, p
 // This is read-only: no Layer 3 is pushed and no Acts are fired, so the
 // endpoint is safe to expose to a policy engineer.
 func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, steward, requester string) (*reasoner.StewardClauses, error) {
+	clauses, _, err := s.GetAllowedClausesForStewardWithTiming(ctx, steward, requester)
+	return clauses, err
+}
+
+// GetAllowedClausesForStewardWithTiming behaves like
+// GetAllowedClausesForSteward, but also returns per-stage timing metrics.
+func (s *ValidationService) GetAllowedClausesForStewardWithTiming(
+	ctx context.Context,
+	steward,
+	requester string,
+) (*reasoner.StewardClauses, AllowedClausesTiming, error) {
+	timing := AllowedClausesTiming{}
+	serviceStart := time.Now()
+
 	if steward == "" {
-		return nil, fmt.Errorf("steward is required")
+		timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+		return nil, timing, fmt.Errorf("steward is required")
 	}
 
+	stageStart := time.Now()
 	provider := s.resolveProvider(steward)
+	timing.ResolveProviderMs = time.Since(stageStart).Milliseconds()
+
+	stageStart = time.Now()
 	phrases, found, err := provider.GetLayer2Phrases(steward)
+	timing.LoadStewardPhrasesMs = time.Since(stageStart).Milliseconds()
 	if err != nil {
 		s.logger.Warn("failed to load Layer-2 phrases for steward",
 			zap.String("steward", steward),
 			zap.String("provider", provider.Name()),
 			zap.Error(err),
 		)
-		return nil, fmt.Errorf("loading Layer-2 phrases for %s: %w", steward, err)
+		timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+		return nil, timing, fmt.Errorf("loading Layer-2 phrases for %s: %w", steward, err)
 	}
 	if !found {
-		return nil, nil
+		timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+		return nil, timing, nil
 	}
 
+	stageStart = time.Now()
 	sharedRules, err := s.loadSharedRules()
+	timing.LoadSharedRulesMs = time.Since(stageStart).Milliseconds()
 	if err != nil {
-		return nil, err
+		timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+		return nil, timing, err
 	}
 
 	params := reasoner.IntrospectStewardClausesParams{
@@ -482,9 +519,12 @@ func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, ste
 		params.Requesters = []string{requester}
 	}
 
+	stageStart = time.Now()
 	clauses, err := s.reasoner.IntrospectStewardClauses(ctx, params)
+	timing.ReasonerIntrospectMs = time.Since(stageStart).Milliseconds()
 	if err != nil {
-		return nil, fmt.Errorf("introspecting steward clauses: %w", err)
+		timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+		return nil, timing, fmt.Errorf("introspecting steward clauses: %w", err)
 	}
 
 	// When a specific requester was requested, filter the relations down to
@@ -492,6 +532,7 @@ func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, ste
 	// by grounding only the requested requester atom, but this guard handles
 	// any stub or legacy reasoner implementation that ignores the Requesters
 	// field).
+	stageStart = time.Now()
 	if requester != "" && clauses != nil {
 		filtered := make([]reasoner.RequesterClauses, 0, 1)
 		for _, rel := range clauses.Relations {
@@ -502,8 +543,10 @@ func (s *ValidationService) GetAllowedClausesForSteward(ctx context.Context, ste
 		}
 		clauses.Relations = filtered
 	}
+	timing.FilterRelationsMs = time.Since(stageStart).Milliseconds()
 
-	return clauses, nil
+	timing.ServiceTotalMs = time.Since(serviceStart).Milliseconds()
+	return clauses, timing, nil
 }
 
 func containsString(haystack []string, needle string) bool {

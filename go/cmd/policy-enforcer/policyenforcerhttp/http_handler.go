@@ -19,7 +19,11 @@
 package policyenforcerhttp
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -58,8 +62,9 @@ func (h *HTTPHandler) GetAllowedClauses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	requester := r.URL.Query().Get("requester")
+	start := time.Now()
 
-	clauses, err := h.validationService.GetAllowedClausesForSteward(r.Context(), steward, requester)
+	clauses, timing, err := h.validationService.GetAllowedClausesForStewardWithTiming(r.Context(), steward, requester)
 	if err != nil {
 		h.logger.Error("policy enforcer: GetAllowedClauses failed",
 			zap.String("steward", steward),
@@ -73,6 +78,25 @@ func (h *HTTPHandler) GetAllowedClauses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	execMs := time.Since(start).Milliseconds()
+	w.Header().Set("X-Execution-Time-Ms", strconv.FormatInt(execMs, 10))
+	w.Header().Set("X-Stage-Resolve-Provider-Ms", strconv.FormatInt(timing.ResolveProviderMs, 10))
+	w.Header().Set("X-Stage-Load-Steward-Phrases-Ms", strconv.FormatInt(timing.LoadStewardPhrasesMs, 10))
+	w.Header().Set("X-Stage-Load-Shared-Rules-Ms", strconv.FormatInt(timing.LoadSharedRulesMs, 10))
+	w.Header().Set("X-Stage-Reasoner-Introspect-Ms", strconv.FormatInt(timing.ReasonerIntrospectMs, 10))
+	w.Header().Set("X-Stage-Filter-Relations-Ms", strconv.FormatInt(timing.FilterRelationsMs, 10))
+	w.Header().Set("X-Stage-Service-Total-Ms", strconv.FormatInt(timing.ServiceTotalMs, 10))
+
+	serverTiming := strings.Join([]string{
+		fmt.Sprintf("allowed-clauses-total;dur=%d", execMs),
+		fmt.Sprintf("service-total;dur=%d", timing.ServiceTotalMs),
+		fmt.Sprintf("resolve-provider;dur=%d", timing.ResolveProviderMs),
+		fmt.Sprintf("load-steward-phrases;dur=%d", timing.LoadStewardPhrasesMs),
+		fmt.Sprintf("load-shared-rules;dur=%d", timing.LoadSharedRulesMs),
+		fmt.Sprintf("reasoner-introspect;dur=%d", timing.ReasonerIntrospectMs),
+		fmt.Sprintf("filter-relations;dur=%d", timing.FilterRelationsMs),
+	}, ", ")
+	w.Header().Set("Server-Timing", serverTiming)
 	httpapi.WriteJSON(w, http.StatusOK, clauses)
 }
 
