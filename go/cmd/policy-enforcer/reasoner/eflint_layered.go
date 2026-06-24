@@ -93,6 +93,8 @@ func (r *EflintReasoner) loggedQueryInstances(s phrasesSender, phrase string) ([
 //  7. Release the pool entry; the pool restarts the eFLINT process with the
 //     Layer-1 baseline so no state leaks between requests.
 func (r *EflintReasoner) EvaluateRequestApproval(ctx context.Context, params RequestApprovalParams) (*RequestApprovalResult, error) {
+	// Note: [Alexandros] This seems to do too many calls to the eFLINT server which hurts performance.
+
 	if params.Requester == "" {
 		return nil, fmt.Errorf("requester is required")
 	}
@@ -106,29 +108,20 @@ func (r *EflintReasoner) EvaluateRequestApproval(ctx context.Context, params Req
 	}()
 	mgr := entry.Manager
 
+	requesterLit := quoteEflintLiteral(params.Requester)
+	layer3 := buildLayer3Phrases(requesterLit, params.Stewards)
+
 	if strings.TrimSpace(params.SharedRules) != "" {
 		if _, err := mgr.SendPhrases(params.SharedRules); err != nil {
 			return nil, fmt.Errorf("failed to load Layer-2 shared rules: %w", err)
 		}
 	}
 
-	for _, steward := range params.Stewards {
-		text, ok := params.StewardPhrases[steward]
-		if !ok || strings.TrimSpace(text) == "" {
-			r.logger.Debug("no Layer-2 phrases for steward; skipping",
-				zap.String("steward", steward),
-			)
-			continue
+	setupPhrases := buildEvaluationSetupPhrases(r.logger, params.Stewards, params.StewardPhrases, layer3)
+	if strings.TrimSpace(setupPhrases) != "" {
+		if _, err := mgr.SendPhrases(setupPhrases); err != nil {
+			return nil, fmt.Errorf("failed to load setup phrases (per-steward Layer-2 + Layer-3): %w", err)
 		}
-		if _, err := mgr.SendPhrases(text); err != nil {
-			return nil, fmt.Errorf("failed to load Layer-2 agreement for %s: %w", steward, err)
-		}
-	}
-
-	requesterLit := quoteEflintLiteral(params.Requester)
-	layer3 := buildLayer3Phrases(requesterLit, params.Stewards)
-	if _, err := mgr.SendPhrases(layer3); err != nil {
-		return nil, fmt.Errorf("failed to load Layer-3 request facts: %w", err)
 	}
 
 	permittedRequest, err := queryHolds(mgr, fmt.Sprintf("permitted-request(%s)", requesterLit))
@@ -150,21 +143,19 @@ func (r *EflintReasoner) EvaluateRequestApproval(ctx context.Context, params Req
 		}
 
 		stewardLit := quoteEflintLiteral(steward)
-		permittedAtSteward, err := queryHolds(mgr,
-			fmt.Sprintf("permitted-at-steward(%s, %s)", requesterLit, stewardLit))
+		permittedAtSteward, archetypes, computeProviders, err := queryStewardDecisionBundled(
+			mgr,
+			requesterLit,
+			stewardLit,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to query permitted-at-steward(%s): %w", steward, err)
+			return nil, fmt.Errorf("failed to query bundled steward decision (%s): %w", steward, err)
 		}
 		decision.Permitted = permittedAtSteward
 		if !permittedAtSteward {
 			decision.Reason = "permitted-at-steward did not hold"
 			result.PerSteward[steward] = decision
 			continue
-		}
-
-		archetypes, computeProviders, err := r.collectValidIntersections(mgr, params.Requester, steward)
-		if err != nil {
-			return nil, fmt.Errorf("failed to collect valid intersections for %s: %w", steward, err)
 		}
 		decision.Archetypes = archetypes
 		decision.ComputeProviders = computeProviders
@@ -185,6 +176,48 @@ func (r *EflintReasoner) EvaluateRequestApproval(ctx context.Context, params Req
 	}
 
 	return result, nil
+}
+
+// queryStewardDecisionBundled sends one phrases command for a steward-specific
+// query block and parses:
+//   - query-results[0] => permitted-at-steward(...)
+//   - inst-query-results rows split by fact-type into archetypes/providers.
+func queryStewardDecisionBundled(
+	mgr *eflint.Manager,
+	requesterLit string,
+	stewardLit string,
+) (bool, []string, []string, error) {
+	phrase := strings.Join([]string{
+		fmt.Sprintf("?Holds(permitted-at-steward(%s, %s)).", requesterLit, stewardLit),
+		fmt.Sprintf("?-archetype When valid-archetype(%s, %s, archetype).", requesterLit, stewardLit),
+		fmt.Sprintf("?-compute-provider When valid-compute-provider(%s, %s, compute-provider).", requesterLit, stewardLit),
+	}, "\n")
+
+	resp, err := mgr.SendPhrases(phrase)
+	if err != nil {
+		return false, nil, nil, fmt.Errorf("bundled steward query failed: %w", err)
+	}
+	if resp == nil {
+		return false, nil, nil, fmt.Errorf("nil response for bundled steward query")
+	}
+
+	permittedAtSteward := false
+	if len(resp.QueryResults) > 0 {
+		permittedAtSteward = strings.EqualFold(strings.TrimSpace(resp.QueryResults[0]), "success")
+	}
+
+	archetypes := make([]string, 0)
+	computeProviders := make([]string, 0)
+	for _, row := range resp.InstQueryResults {
+		switch strings.TrimSpace(row.FactType) {
+		case "archetype":
+			archetypes = append(archetypes, row.Value)
+		case "compute-provider":
+			computeProviders = append(computeProviders, row.Value)
+		}
+	}
+
+	return permittedAtSteward, archetypes, computeProviders, nil
 }
 
 // collectValidIntersections derives the matched archetypes / compute providers
@@ -272,6 +305,38 @@ func buildLayer3Phrases(requesterLit string, stewards []string) string {
 	return b.String()
 }
 
+// buildEvaluationSetupPhrases combines per-steward Layer-2 agreements and
+// Layer-3 request facts into one phrase block so request-scoped setup can be
+// sent in a single eFLINT round-trip.
+func buildEvaluationSetupPhrases(logger *zap.Logger, stewards []string, stewardPhrases map[string]string, layer3 string) string {
+	var b strings.Builder
+
+	appendPhraseBlock := func(text string) {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		b.WriteString(text)
+		if !strings.HasSuffix(text, "\n") {
+			b.WriteString("\n")
+		}
+	}
+
+	for _, steward := range stewards {
+		text, ok := stewardPhrases[steward]
+		if !ok || strings.TrimSpace(text) == "" {
+			logger.Debug("no Layer-2 phrases for steward; skipping",
+				zap.String("steward", steward),
+			)
+			continue
+		}
+		appendPhraseBlock(text)
+	}
+
+	appendPhraseBlock(layer3)
+
+	return b.String()
+}
+
 // quoteEflintLiteral wraps a value as an eFLINT string literal. eFLINT requires
 // all fact instance values to be quoted strings — bare atoms are not supported.
 // Values containing special characters (e.g. backslashes or double-quotes) are
@@ -310,18 +375,11 @@ func (r *EflintReasoner) IntrospectStewardClauses(ctx context.Context, params In
 			return nil, fmt.Errorf("failed to load Layer-2 shared rules: %w", err)
 		}
 	}
-	if _, err := mgr.SendPhrases(params.StewardPhrases); err != nil {
-		return nil, fmt.Errorf("failed to load Layer-2 phrases for %s: %w", params.Steward, err)
-	}
 
-	// Ground the provided requester atoms so that generative queries of the
-	// form `?-requester When has-relation(requester, steward).` can enumerate
-	// them. These are the only Layer-3 facts pushed here; no requested-steward
-	// facts and no Acts are fired, keeping the session read-only.
-	if len(params.Requesters) > 0 {
-		requesterPhrases := buildRequesterPhrases(params.Requesters)
-		if _, err := mgr.SendPhrases(requesterPhrases); err != nil {
-			return nil, fmt.Errorf("failed to ground requester facts: %w", err)
+	setupPhrases := buildIntrospectionSetupPhrases(params.StewardPhrases, params.Requesters)
+	if strings.TrimSpace(setupPhrases) != "" {
+		if _, err := mgr.SendPhrases(setupPhrases); err != nil {
+			return nil, fmt.Errorf("failed to load setup phrases for steward introspection (steward + requester grounding): %w", err)
 		}
 	}
 
@@ -378,4 +436,29 @@ func (r *EflintReasoner) IntrospectStewardClauses(ctx context.Context, params In
 	}
 
 	return out, nil
+}
+
+// buildIntrospectionSetupPhrases combines per-steward phrases and optional
+// requester grounding into one phrase block.
+func buildIntrospectionSetupPhrases(stewardPhrases string, requesters []string) string {
+	var b strings.Builder
+
+	appendPhraseBlock := func(text string) {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		b.WriteString(text)
+		if !strings.HasSuffix(text, "\n") {
+			b.WriteString("\n")
+		}
+	}
+
+	appendPhraseBlock(stewardPhrases)
+
+	// Ground requester atoms so generative requester queries can enumerate them.
+	if len(requesters) > 0 {
+		appendPhraseBlock(buildRequesterPhrases(requesters))
+	}
+
+	return b.String()
 }
