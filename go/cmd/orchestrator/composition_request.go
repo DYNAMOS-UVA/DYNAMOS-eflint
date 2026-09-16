@@ -245,8 +245,16 @@ func chooseThirdParty(validationResponse *pb.ValidationResponse) (lib.AgentDetai
 
 	// Iterate over all valid dataproviders
 	for _, dataProvider := range validationResponse.ValidDataproviders {
-		// For each compute provider in a valid dataprovider
+		// Dedupe per-provider compute providers before counting, since a
+		// provider's ComputeProviders slice may contain repeated entries
+		// (e.g. from the reasoner), which would otherwise inflate its
+		// contribution to intersectionMap beyond 1 per provider.
+		seen := make(map[string]bool, len(dataProvider.ComputeProviders))
 		for _, computeProvider := range dataProvider.ComputeProviders {
+			if seen[computeProvider] {
+				continue
+			}
+			seen[computeProvider] = true
 			intersectionMap[computeProvider]++
 		}
 	}
