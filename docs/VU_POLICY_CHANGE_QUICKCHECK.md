@@ -93,7 +93,7 @@ Check allowed clauses for the user:
 
     curl -sS -G "http://127.0.0.1:18083/api/v1/policy-enforcer/allowed-clauses" \
       --data-urlencode "steward=VU" \
-      --data-urlencode "requester=jorrit.stutterheim@cloudnation.nl"
+      --data-urlencode "requester=Jorrit"
 
 Expected after removing `computeToData`:
 - `archetypes` contains `dataThroughTtp`
@@ -106,10 +106,17 @@ Validate request through the current HTTP validate schema:
       -d '{
         "user": {
           "id": "1",
-          "user_name": "jorrit.stutterheim@cloudnation.nl"
+          "user_name": "Jorrit"
         },
         "data_providers": ["VU"]
       }'
+
+Note: `user_name` must exactly match the requester identifier used in the
+agreement's `+has-relation(...)` fact (see `configuration/eflint-models/VU.eflint`,
+currently `"Jorrit"`, not the email `jorrit.stutterheim@cloudnation.nl`). The
+validate request builds the Layer-3 `+requester(...)` fact directly from this
+field, so a mismatch causes `has-relation` to fail and the steward to be
+reported as invalid even though the agreement supports the archetype.
 
 Expected:
 - Response is a `validationResponse` JSON.
