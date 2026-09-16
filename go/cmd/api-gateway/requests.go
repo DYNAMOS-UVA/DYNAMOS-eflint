@@ -109,13 +109,6 @@ func requestHandler() http.HandlerFunc {
 			// Set the data request interface to the request metadata from the previous steps
 			dataRequestInterface["requestMetadata"] = requestMetadata
 
-			// only return the validation response for benchmarking purposes
-			// TODO: Remove this once the benchmarking is done
-			jsonResponse, err := json.Marshal(msg)
-			w.WriteHeader(http.StatusOK)
-			w.Write(jsonResponse)
-			return
-
 			// Marshal the combined data back into JSON for forwarding
 			dataRequestJson, err := json.Marshal(dataRequestInterface)
 			if err != nil {
