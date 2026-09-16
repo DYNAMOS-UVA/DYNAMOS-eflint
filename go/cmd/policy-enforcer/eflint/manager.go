@@ -355,14 +355,7 @@ func (m *Manager) SendPhrases(text string) (*PhrasesResponse, error) {
 	if len(phrasesResp.Errors) > 0 {
 		var errMsgs []string
 		for _, e := range phrasesResp.Errors {
-			msg := strings.TrimSpace(e.Message)
-			if msg == "" {
-				msg = strings.TrimSpace(e.Type)
-			}
-			if msg == "" {
-				msg = "unknown error"
-			}
-			errMsgs = append(errMsgs, msg)
+			errMsgs = append(errMsgs, e.Message)
 		}
 		return &phrasesResp, fmt.Errorf("eFLINT phrases command had errors: %s", strings.Join(errMsgs, "; "))
 	}
