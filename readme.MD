@@ -34,7 +34,8 @@ The Fabric-CloudLab profile can be cloned and adapted from the [dynamos-cluster]
   - [12. Add DYNAMOS env vars and helper functions to shell](#12-add-dynamos-env-vars-and-helper-functions-to-shell)
 - [Example](#example)
   - [13. Example Request](#13-example-request)
-    - [13.1 Policy Enforcer validation (WSL)](#131-policy-enforcer-validation-wsl)
+    - [13.1 Trigger and poll a request with the helper script](#131-trigger-and-poll-a-request-with-the-helper-script)
+    - [13.2 Policy Enforcer validation (WSL)](#132-policy-enforcer-validation-wsl)
 - [Troubleshooting](#troubleshooting)
   - [14. Services crash because the connection to RabbitMQ does not work](#14-services-crash-because-the-connection-to-rabbitmq-does-not-work)
 
@@ -323,7 +324,7 @@ as a **POST** request, with the following body with **JSON** encoding:
     "type": "sqlDataRequest",
     "user": {
         "id": "12324",
-        "userName": "jorrit.stutterheim@cloudnation.nl"
+        "userName": "Jorrit"
     },
     "dataProviders": ["VU","UVA","RUG"],
     "data_request": {
@@ -348,7 +349,7 @@ curl --location 'http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requ
     "type": "sqlDataRequest",
     "user": {
         "id": "12324",
-        "userName": "jorrit.stutterheim@cloudnation.nl"
+        "userName": "Jorrit"
     },
     "dataProviders": ["VU","UVA","RUG"],
     "data_request": {
@@ -389,7 +390,21 @@ curl --location 'http://localhost:8080/api/v1/requestApproval' \
 }'
 ```
 
-### 13.1 Policy Enforcer validation (WSL)
+### 13.1 Trigger and poll a request with the helper script
+
+Instead of crafting the curl commands above by hand, use `scripts/trigger-and-poll-request.sh`. It sends the request and polls `/api/v1/requestStatus` every 2 seconds (70 second timeout) until the job finishes:
+
+computeToData example (aggregate:false)
+```bash
+bash ./scripts/trigger-and-poll-request.sh
+```
+
+dataThroughTtp example (aggregate:true)
+```bash
+bash ./scripts/trigger-and-poll-request.sh 2
+```
+
+### 13.2 Policy Enforcer validation (WSL)
 
 When testing the Policy Enforcer directly from WSL (for example with a port-forward on `18082:8080`), use this request shape:
 

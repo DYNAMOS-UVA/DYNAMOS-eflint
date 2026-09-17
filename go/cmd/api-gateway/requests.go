@@ -13,29 +13,66 @@ import (
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
+	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opencensus.io/trace"
 	"go.opencensus.io/trace/propagation"
 )
 
+// jobStatus is the polled state of an in-flight/completed asynchronous request.
+type jobStatus struct {
+	Status string `json:"status"` // "pending", "done", or "error"
+	Result []byte `json:"-"`
+	Error  string `json:"error,omitempty"`
+}
+
+var (
+	// jobStore holds the result/status of the single job allowed to run at a time,
+	// keyed by jobId so a client can keep polling the same id it received up front.
+	jobStore = &sync.Map{}
+
+	// Only one request may be in flight at a time; activeJobID is non-empty
+	// while a job is pending and is cleared once it completes (success or error).
+	activeJobMutex sync.Mutex
+	activeJobID    string
+)
+
 func requestHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Debug("Starting requestApprovalHandler")
-		ctxWithTimeout, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
 
-		// Start a new span with the context that has a timeout
-		ctx, span := trace.StartSpan(ctxWithTimeout, "requestApprovalHandler")
-		defer span.End()
+		// Reject the request outright if another one is already in flight.
+		activeJobMutex.Lock()
+		if activeJobID != "" {
+			existing := activeJobID
+			activeJobMutex.Unlock()
+			logger.Sugar().Warnf("Rejecting new request, job %s is still active", existing)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "another request is already in progress",
+				"jobId": existing,
+			})
+			return
+		}
+		jobId := uuid.NewString()
+		activeJobID = jobId
+		activeJobMutex.Unlock()
 
 		body, err := api.GetRequestBody(w, r, serviceName)
 		if err != nil {
+			activeJobMutex.Lock()
+			activeJobID = ""
+			activeJobMutex.Unlock()
 			return
 		}
 
 		var apiReqApproval api.RequestApproval
 		if err := json.Unmarshal(body, &apiReqApproval); err != nil {
 			logger.Sugar().Errorf("Error unmMarshalling get apiReqApproval: %v", err)
+			activeJobMutex.Lock()
+			activeJobID = ""
+			activeJobMutex.Unlock()
 			return
 		}
 
@@ -47,6 +84,9 @@ func requestHandler() http.HandlerFunc {
 		var dataRequestInterface map[string]interface{}
 		if err := json.Unmarshal(apiReqApproval.DataRequest, &dataRequestInterface); err != nil {
 			logger.Sugar().Errorf("Error unmarhsalling get request: %v", err)
+			activeJobMutex.Lock()
+			activeJobID = ""
+			activeJobMutex.Unlock()
 			return
 		}
 
@@ -54,6 +94,9 @@ func requestHandler() http.HandlerFunc {
 		dataRequestOptions.Options = make(map[string]bool)
 		if err := json.Unmarshal(apiReqApproval.DataRequest, &dataRequestOptions); err != nil {
 			logger.Sugar().Errorf("Error unmMarshalling get apiReqApproval: %v", err)
+			activeJobMutex.Lock()
+			activeJobID = ""
+			activeJobMutex.Unlock()
 			return
 		}
 
@@ -68,66 +111,124 @@ func requestHandler() http.HandlerFunc {
 			Options:          dataRequestOptions.Options,
 		}
 
-		// Create a channel to receive the response
-		responseChan := make(chan validation)
+		jobStore.Store(jobId, &jobStatus{Status: "pending"})
 
-		requestApprovalMutex.Lock()
-		requestApprovalMap[protoRequest.User.Id] = responseChan
-		requestApprovalMutex.Unlock()
+		// Run the rest of the flow asynchronously so the HTTP handler can
+		// return immediately with the jobId; the caller polls for the result.
+		go processRequestApproval(jobId, protoRequest, dataRequestInterface, apiReqApproval.Type)
 
-		_, err = c.SendRequestApproval(ctx, protoRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"jobId": jobId})
+	}
+}
+
+// processRequestApproval runs the request-approval + data-dispatch flow in the
+// background and stores the outcome in jobStore under jobId. It always clears
+// activeJobID when done (success or failure) so a new request can be accepted.
+func processRequestApproval(jobId string, protoRequest *pb.RequestApproval, dataRequestInterface map[string]interface{}, requestType string) {
+	defer func() {
+		activeJobMutex.Lock()
+		activeJobID = ""
+		activeJobMutex.Unlock()
+	}()
+
+	finish := func(status string, result []byte, errMsg string) {
+		jobStore.Store(jobId, &jobStatus{Status: status, Result: result, Error: errMsg})
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ctx, span := trace.StartSpan(ctxWithTimeout, "requestApprovalHandler")
+	defer span.End()
+
+	// Create a channel to receive the response
+	responseChan := make(chan validation)
+
+	requestApprovalMutex.Lock()
+	requestApprovalMap[protoRequest.User.Id] = responseChan
+	requestApprovalMutex.Unlock()
+
+	_, err := c.SendRequestApproval(ctx, protoRequest)
+	if err != nil {
+		logger.Sugar().Errorf("error in sending requestapproval: %v", err)
+	}
+
+	select {
+	case validationStruct := <-responseChan:
+		msg := validationStruct.response
+
+		logger.Sugar().Infof("Received response, %s", msg.Type)
+		if msg.Type != "requestApprovalResponse" {
+			logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
+			finish("error", nil, "internal server error")
+			return
+		}
+
+		if msg.Error != "" {
+			logger.Sugar().Warnf("Request approval denied: %s", msg.Error)
+			finish("error", nil, msg.Error)
+			return
+		}
+
+		// Add necessary information for the data request in the request metadata
+		requestMetadata := &pb.RequestMetadata{
+			// Add the job id from the request approval to the data request body
+			JobId: msg.JobId,
+			// initialize the map to add values to it
+			Traces: make(map[string][]byte),
+		}
+		// Add the binary trace of the span to the data request (used for appending the traces)
+		requestMetadata.Traces["binaryTrace"] = propagation.Binary(span.SpanContext())
+		// Set the data request interface to the request metadata from the previous steps
+		dataRequestInterface["requestMetadata"] = requestMetadata
+
+		// Marshal the combined data back into JSON for forwarding
+		dataRequestJson, err := json.Marshal(dataRequestInterface)
 		if err != nil {
-			logger.Sugar().Errorf("error in sending requestapproval: %v", err)
+			logger.Sugar().Errorf("Error marshalling combined data: %v", err)
+			finish("error", nil, "failed to marshal data request")
+			return
 		}
 
-		select {
-		case validationStruct := <-responseChan:
-			msg := validationStruct.response
+		logger.Sugar().Infof("Data Prepared jsonData: %s", dataRequestJson)
 
-			logger.Sugar().Infof("Received response, %s", msg.Type)
-			if msg.Type != "requestApprovalResponse" {
-				logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-				return
-			}
+		// Send the data to the authorized providers
+		responses := sendDataToAuthProviders(dataRequestJson, msg.AuthorizedProviders, requestType, msg.JobId)
+		finish("done", responses, "")
 
-			if msg.Error != "" {
-				logger.Sugar().Warnf("Request approval denied: %s", msg.Error)
-				http.Error(w, msg.Error, http.StatusForbidden)
-				return
-			}
+	case <-ctx.Done():
+		finish("error", nil, "request timed out")
+	}
+}
 
-			// Add necessary information for the data request in the request metadata
-			requestMetadata := &pb.RequestMetadata{
-				// Add the job id from the request approval to the data request body
-				JobId: msg.JobId,
-				// initialize the map to add values to it
-				Traces: make(map[string][]byte),
-			}
-			// Add the binary trace of the span to the data request (used for appending the traces)
-			requestMetadata.Traces["binaryTrace"] = propagation.Binary(span.SpanContext())
-			// Set the data request interface to the request metadata from the previous steps
-			dataRequestInterface["requestMetadata"] = requestMetadata
+// requestStatusHandler lets the client poll for the outcome of the single
+// in-flight (or most recently completed) request identified by jobId.
+func requestStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobId := r.URL.Query().Get("jobId")
+		if jobId == "" {
+			http.Error(w, "jobId query parameter is required", http.StatusBadRequest)
+			return
+		}
 
-			// Marshal the combined data back into JSON for forwarding
-			dataRequestJson, err := json.Marshal(dataRequestInterface)
-			if err != nil {
-				logger.Sugar().Errorf("Error marshalling combined data: %v", err)
-				return
-			}
+		v, ok := jobStore.Load(jobId)
+		if !ok {
+			http.Error(w, "unknown jobId", http.StatusNotFound)
+			return
+		}
+		job := v.(*jobStatus)
 
-			logger.Sugar().Infof("Data Prepared jsonData: %s", dataRequestJson)
-
-			// Send the data to the authorized providers
-			responses := sendDataToAuthProviders(dataRequestJson, msg.AuthorizedProviders, apiReqApproval.Type, msg.JobId)
+		w.Header().Set("Content-Type", "application/json")
+		if job.Status == "done" {
 			w.WriteHeader(http.StatusOK)
-			w.Write(responses)
-			return
-
-		case <-ctx.Done():
-			http.Error(w, "Request timed out", http.StatusRequestTimeout)
+			w.Write(job.Result)
 			return
 		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(job)
 	}
 }
 
@@ -136,7 +237,8 @@ func requestHandler() http.HandlerFunc {
 func sendDataToAuthProviders(dataRequest []byte, authorizedProviders map[string]string, msgType string, jobId string) []byte {
 	// Setup the wait group for async data requests
 	var wg sync.WaitGroup
-	var responses []string
+	var responsesMutex sync.Mutex
+	responses := make(map[string]string, len(authorizedProviders))
 
 	// This will be replaced with AMQ in the future
 	agentPort := "8080"
@@ -151,15 +253,19 @@ func sendDataToAuthProviders(dataRequest []byte, authorizedProviders map[string]
 		logger.Sugar().Infof("Sending request to %s. Endpoint: %s JSON:%v", target, endpoint, string(dataRequest))
 
 		// Async call send the data
-		go func() {
+		go func(providerName, endpoint string) {
+			defer wg.Done()
 			respData, err := sendData(endpoint, dataRequest)
+
+			responsesMutex.Lock()
+			defer responsesMutex.Unlock()
 			if err != nil {
-				logger.Sugar().Errorf("Error sending data, %v", err)
+				logger.Sugar().Errorf("Error sending data to %s: %v", providerName, err)
+				responses[providerName] = fmt.Sprintf("error: %v", err)
+				return
 			}
-			responses = append(responses, respData)
-			// Signal that the data request has been sent to all auth providers
-			wg.Done()
-		}()
+			responses[providerName] = respData
+		}(auth, endpoint)
 	}
 
 	// Wait until all the requests are complete
