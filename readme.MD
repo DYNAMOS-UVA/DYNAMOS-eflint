@@ -328,7 +328,7 @@ as a **POST** request, with the following body with **JSON** encoding:
     "dataProviders": ["VU","UVA","RUG"],
     "data_request": {
         "type": "sqlDataRequest",
-        "query" : "SELECT * FROM Personen p JOIN Aanstellingen s LIMIT 1000",
+        "query" : "SELECT * FROM Personen p JOIN Aanstellingen s ON p.Unieknr = s.Unieknr LIMIT 1000",
         "algorithm" : "average",
         "options" : {
             "graph" : false,
@@ -353,11 +353,36 @@ curl --location 'http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requ
     "dataProviders": ["VU","UVA","RUG"],
     "data_request": {
         "type": "sqlDataRequest",
-        "query" : "SELECT * FROM Personen p JOIN Aanstellingen s LIMIT 1000",
+        "query" : "SELECT * FROM Personen p JOIN Aanstellingen s ON p.Unieknr = s.Unieknr LIMIT 1000",
         "algorithm" : "average",
         "options" : {
             "graph" : false,
             "aggregate": false
+        },
+        "requestMetadata": {}
+    }
+}'
+```
+
+Example that uses the TTP archetype: 
+
+```
+curl --location 'http://localhost:8080/api/v1/requestApproval' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+    "type": "sqlDataRequest",
+    "user": {
+        "id": "12324",
+        "userName": "Jorrit"
+    },
+    "dataProviders": ["VU","UVA","RUG"],
+    "data_request": {
+        "type": "sqlDataRequest",
+        "query" : "SELECT * FROM Personen p JOIN Aanstellingen s ON p.Unieknr = s.Unieknr LIMIT 1000",
+        "algorithm" : "average",
+        "options" : {
+            "graph" : false,
+            "aggregate": true
         },
         "requestMetadata": {}
     }
