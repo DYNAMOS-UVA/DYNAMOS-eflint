@@ -25,10 +25,7 @@ func sqlDataRequestHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Debug("Entering sqlDataRequestHandler")
 
-		ctxWithTimeout, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-
-		// Get the sql data request 
+		// Get the sql data request
 		sqlDataRequest := &pb.SqlDataRequest{}
 		sqlDataRequest.RequestMetadata = &pb.RequestMetadata{}
 
@@ -50,7 +47,7 @@ func sqlDataRequestHandler() http.HandlerFunc {
 
 		// Append to the previous span using the trace variable (this can only be done here because the sqlDataRequest needs to be unmarshalled first,
 		// otherwise it cannot read it and it will be empty for example)
-		ctx, span, err := lib.StartRemoteParentSpan(ctxWithTimeout, serviceName+"/func: sqlDataRequestHandler", sqlDataRequest.RequestMetadata.Traces)
+		ctx, span, err := lib.StartRemoteParentSpan(r.Context(), serviceName+"/func: sqlDataRequestHandler", sqlDataRequest.RequestMetadata.Traces)
 		if err != nil {
 			logger.Sugar().Warnf("Error starting span: %v", err)
 		}
@@ -69,6 +66,18 @@ func sqlDataRequestHandler() http.HandlerFunc {
 			http.Error(w, "No job found for this user", http.StatusBadRequest)
 			return
 		}
+
+		// The computeProvider (dataThroughTtp) role has strictly more sequential/parallel
+		// work than the "all" (computeToData) role: it fans out to every dataProvider over
+		// RabbitMQ, each of which deploys its own k8s Job, on top of deploying its own job
+		// here — so it needs a longer budget than the single-provider "all" path.
+		requestTimeout := 30 * time.Second
+		if strings.EqualFold(compositionRequest.Role, "computeProvider") {
+			requestTimeout = 60 * time.Second
+		}
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+		ctx = ctxWithTimeout
 
 		// Generate correlationID for this request
 		correlationId := uuid.New().String()
@@ -192,6 +201,7 @@ func handleSqlComputeProvider(ctx context.Context, jobName string, compositionRe
 		return ctx, fmt.Errorf("expected to know dataproviders")
 	}
 
+	var sendErrors []error
 	for _, dataProvider := range compositionRequest.DataProviders {
 		dataProviderRoutingKey := fmt.Sprintf("/agents/online/%s", dataProvider)
 		var agentData lib.AgentDetails
@@ -219,10 +229,17 @@ func handleSqlComputeProvider(ctx context.Context, jobName string, compositionRe
 			logger.Sugar().Errorf("Error PutEtcdWithGrant: %v", err)
 		}
 
-		_, err = c.SendSqlDataRequest(ctx, sqlDataRequest)
-		if err != nil {
-			logger.Sugar().Errorf("Error c.SendSqlDataRequest: %v", err)
+		if _, err = c.SendSqlDataRequest(ctx, sqlDataRequest); err != nil {
+			logger.Sugar().Errorf("Error c.SendSqlDataRequest to %s: %v", dataProvider, err)
+			sendErrors = append(sendErrors, fmt.Errorf("%s: %w", dataProvider, err))
 		}
+	}
+
+	// A dataProvider that never received the request will never send data back, so the
+	// aggregate step downstream would wait forever. Bail out now instead of deploying a
+	// job that is guaranteed to hang until it hits ActiveDeadlineSeconds.
+	if len(sendErrors) > 0 {
+		return ctx, fmt.Errorf("failed to reach %d/%d dataProvider(s): %v", len(sendErrors), len(compositionRequest.DataProviders), sendErrors)
 	}
 
 	// TODO: Parse SQL request for extra compute services

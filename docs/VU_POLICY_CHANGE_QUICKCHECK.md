@@ -52,13 +52,13 @@ Use the compatibility endpoint to upload an `.eflint` file directly. The steward
     curl -i -X POST "http://127.0.0.1:18082/api/v1/policyEnforcer/eflintModels" \
       -F "file=@configuration/eflint-models/VU.eflint"
 
-(confirm it works)
+<!-- (confirm it works)
 
 Alternative (raw body + filename query parameter):
 
     curl -i -X POST "http://127.0.0.1:18082/api/v1/policyEnforcer/eflintModels?filename=VU.eflint" \
       -H "Content-Type: text/plain" \
-      --data-binary @configuration/eflint-models/VU.eflint
+      --data-binary @configuration/eflint-models/VU.eflint -->
 
 ### Option B: Native steward endpoint (PUT)
 
@@ -79,13 +79,13 @@ Notes:
 
 Continue with the verification steps below regardless of which option you used.
 
-## 4) Confirm model in etcd
+<!-- ## 4) Confirm model in etcd
 
     ETCD_POD=$(kubectl -n core get pod -l app=etcd -o jsonpath="{.items[0].metadata.name}")
     kubectl -n core exec "$ETCD_POD" -- sh -c 
       "ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 get /policyEnforcer/eflintModels/VU | sed -n '1,160p'"
 
-Confirm the output matches your edited `VU.eflint` content.
+Confirm the output matches your edited `VU.eflint` content. -->
 
 ## 5) Confirm policy behavior through Policy Enforcer
 

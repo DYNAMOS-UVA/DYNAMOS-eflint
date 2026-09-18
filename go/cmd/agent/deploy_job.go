@@ -109,7 +109,7 @@ func deployJob(ctx context.Context, msChain []mschain.MicroserviceMetadata, jobN
 		container := v1.Container{
 			Name:            microservice.Name,
 			Image:           fullImage,
-			ImagePullPolicy: "Always",
+			ImagePullPolicy: "IfNotPresent",
 			Env: []v1.EnvVar{
 				{Name: "DATA_STEWARD_NAME", Value: strings.ToUpper(dataStewardName)},
 				{Name: "DESIGNATED_GRPC_PORT", Value: strconv.Itoa(port)},
@@ -165,7 +165,7 @@ func addSidecar() v1.Container {
 	return v1.Container{
 		Name:            sidecarName,
 		Image:           fullImage,
-		ImagePullPolicy: "Always",
+		ImagePullPolicy: "IfNotPresent",
 		Env: []v1.EnvVar{
 			{Name: "DESIGNATED_GRPC_PORT", Value: strconv.Itoa(firstPortMicroservice - 1)},
 			{Name: "TEMPORARY_JOB", Value: "true"},

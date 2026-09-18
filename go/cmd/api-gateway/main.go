@@ -74,6 +74,7 @@ func main() {
 
 	apiMux := http.NewServeMux()
 	apiMux.Handle("/requestApproval", &ochttp.Handler{Handler: requestHandler()})
+	apiMux.Handle("/requestStatus", &ochttp.Handler{Handler: requestStatusHandler()})
 	apiMux.Handle("/getAvailableProviders", &ochttp.Handler{Handler: availableProvidersHandler()})
 	// go socketServer(apiMux)
 	// server := socketio.NewServer(&engineio.Options{
