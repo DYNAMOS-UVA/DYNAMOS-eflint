@@ -35,7 +35,8 @@ The Fabric-CloudLab profile can be cloned and adapted from the [dynamos-cluster]
 - [Example](#example)
   - [13. Example Request](#13-example-request)
     - [13.1 Trigger and poll a request with the helper script](#131-trigger-and-poll-a-request-with-the-helper-script)
-    - [13.2 Policy Enforcer validation (WSL)](#132-policy-enforcer-validation-wsl)
+    - [13.2 Policy change demo scripts](#132-policy-change-demo-scripts)
+    - [13.3 Policy Enforcer validation](#133-policy-enforcer-validation)
 - [Troubleshooting](#troubleshooting)
   - [14. Services crash because the connection to RabbitMQ does not work](#14-services-crash-because-the-connection-to-rabbitmq-does-not-work)
 
@@ -309,13 +310,12 @@ or
 To make sure we installed everything properly, let's use the AMDeX use case as an example.
 Firstly, make sure everything is deployed, which should've been done with the deployment script. Check the status on k9s or using `kubectl` to check the status of all pods method. For shortcuts see [Bashrc shortcuts.](#bashrc-shortcuts)
 
-Let's setup the request.
+Note that `requestApproval` does not return the result directly - it only returns a `jobId`. The actual result is produced asynchronously, so you then have to poll `/api/v1/requestStatus?jobId=<jobId>` with that id until the job's status is no longer `"pending"` to get the result.
 
-The URL should be:
+The examples below only port-forward `api-gateway`; sections [13.2](#132-policy-change-demo-scripts) and [13.3](#133-policy-enforcer-validation-wsl) additionally port-forward the `orchestrator` and `policy-enforcer` services to reach their respective endpoints.
 
-```
-http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requestApproval
-```
+*Note* that the following examples require port forwarding:
+Port forwarding via kubernetes forwarding (run in a different terminal) `kubectl port-forward -n api-gateway svc/api-gateway 8080:8080`. Alternatively ensure that the url is in the /etc/hosts and use the following endpoint: `http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requestApproval`. Port forwarding is used here because the `/etc/hosts` + Ingress approach from [11. Ingress](#11-ingress) can run into resolution issues under WSL, but if your setup doesn't have that problem, feel free to use the hosts-based endpoint instead.
 
 as a **POST** request, with the following body with **JSON** encoding:
 
@@ -343,7 +343,7 @@ as a **POST** request, with the following body with **JSON** encoding:
 E.g. using curl:
 
 ```
-curl --location 'http://api-gateway.api-gateway.svc.cluster.local:80/api/v1/requestApproval' \
+curl --location 'http://localhost:8080/api/v1/requestApproval' \
 --header 'Content-Type: application/json' \
 --data-raw '{
     "type": "sqlDataRequest",
@@ -390,9 +390,17 @@ curl --location 'http://localhost:8080/api/v1/requestApproval' \
 }'
 ```
 
+Once you have the `jobId` from the response above, poll for the result:
+
+```
+curl --location 'http://localhost:8080/api/v1/requestStatus?jobId=<jobId>'
+```
+
+Repeat this until `status` is no longer `"pending"`. (Or use the following automated scripts)
+
 ### 13.1 Trigger and poll a request with the helper script
 
-Instead of crafting the curl commands above by hand, use `scripts/trigger-and-poll-request.sh`. It sends the request and polls `/api/v1/requestStatus` every 2 seconds (70 second timeout) until the job finishes:
+Instead of crafting the curl commands above by hand, use `scripts/trigger-and-poll-request.sh`. It sends the request and polls `/api/v1/requestStatus` every 2 seconds (120 second timeout) until the job finishes:
 
 computeToData example (aggregate:false)
 ```bash
@@ -404,18 +412,36 @@ dataThroughTtp example (aggregate:true)
 bash ./scripts/trigger-and-poll-request.sh 2
 ```
 
-### 13.2 Policy Enforcer validation (WSL)
+### 13.2 Policy change demo scripts
 
-When testing the Policy Enforcer directly from WSL (for example with a port-forward on `18082:8080`), use this request shape:
+*Note* that the following requires port forwarding for the policy enforcer and orchestrator (run in a different terminal): `kubectl -n orchestrator port-forward svc/orchestrator 18082:8080`, `kubectl -n orchestrator port-forward svc/policy-enforcer 18083:8080`
+
+`scripts/policy-change-demo-computetodata.sh` and `scripts/policy-change-demo-ttp.sh` showcase a live policy change for each archetype: they run the request, upload a restricted VU policy (revoking Jorrit's access), confirm the change via the allowed-clauses endpoint, run the request again to show it's now denied, then restore the original VU policy and run the request once more to confirm access is back.
+
+computeToData example:
+```bash
+bash ./scripts/policy-change-demo-computetodata.sh
+```
+
+dataThroughTtp (TTP) example:
+```bash
+bash ./scripts/policy-change-demo-ttp.sh
+```
+
+### 13.3 Policy Enforcer validation
+
+This is a standalone test of the policy enforcer. 
+
+When testing the Policy Enforcer directly from WSL (for example with a port-forward on `18083:8080`), use this request shape:
 
 ```bash
 curl -i \
-  -X POST http://127.0.0.1:18082/api/v1/policy-enforcer/validate \
+  -X POST http://127.0.0.1:18083/api/v1/policy-enforcer/validate \
   -H "Content-Type: application/json" \
   -d '{
     "user": {
       "id": "1",
-      "user_name": "jorrit.stutterheim@cloudnation.nl"
+      "user_name": "Jorrit"
     },
     "data_providers": ["VU"]
   }'

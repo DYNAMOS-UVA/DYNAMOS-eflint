@@ -62,6 +62,9 @@ define build_and_push
 			-t $(dockerhub_account)/$@:$(branch_name) \
 			-t $(dockerhub_account)/$@:latest \
 			./cmd/$@/)
+
+	docker push $(dockerhub_account)/$@:$(branch_name)
+	docker push $(dockerhub_account)/$@:latest
 endef
 
 # Rule to build and push Docker images for each DYNAMOS service
@@ -94,6 +97,9 @@ policy-enforcer: prepare proto
 				-t $(dockerhub_account)/policy-enforcer:latest \
 				-f Dockerfile .); \
 		fi)
+
+	docker push $(dockerhub_account)/policy-enforcer:$(branch_name)
+	docker push $(dockerhub_account)/policy-enforcer:latest
 
 # Same as above, but for the SQL-based microservices
 $(sql_microservices): prepare proto
