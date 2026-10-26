@@ -16,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const ephemeralImageTag = "eflint-policy-enforcer"
+
 func generateChainAndDeploy(ctx context.Context, compositionRequest *pb.CompositionRequest, localJobName string, options map[string]bool) (context.Context, *batchv1.Job, error) {
 	logger.Debug("Starting generateChainAndDeploy")
 
@@ -95,14 +97,12 @@ func deployJob(ctx context.Context, msChain []mschain.MicroserviceMetadata, jobN
 
 		logger.Sugar().Debugw("job info:", "name: ", microservice.Name, "Port: ", port)
 
-		microserviceTag := getMicroserviceTag(microservice.Name)
-
 		repositoryName := os.Getenv("MICROSERVICE_REPOSITORY_NAME")
 		if repositoryName == "" {
 			repositoryName = "dynamos1"
 		}
 
-		fullImage := fmt.Sprintf("%s/%s:%s", repositoryName, microservice.Name, microserviceTag)
+		fullImage := fmt.Sprintf("%s/%s:%s", repositoryName, microservice.Name, ephemeralImageTag)
 		logger.Sugar().Debugf("FullImage name: %s", fullImage)
 		logger.Sugar().Debugf("Job name: %s", jobName)
 
@@ -157,9 +157,7 @@ func addSidecar() v1.Container {
 		repositoryName = "dynamos1"
 	}
 
-	sidecarTag := getMicroserviceTag(sidecarName)
-
-	fullImage := fmt.Sprintf("%s/%s:%s", repositoryName, sidecarName, sidecarTag)
+	fullImage := fmt.Sprintf("%s/%s:%s", repositoryName, sidecarName, ephemeralImageTag)
 	logger.Sugar().Debugf("Sidecar image name: %s", fullImage)
 
 	return v1.Container{
@@ -261,15 +259,4 @@ func replaceLastCharacter(name string, replaceWith int) string {
 	nameSlice = append(nameSlice, runeSlice...)
 
 	return string(nameSlice)
-}
-
-func getMicroserviceTag(msName string) string {
-	tag := os.Getenv(fmt.Sprintf("%s_TAG", strings.ToUpper(msName)))
-	logger.Sugar().Debugf("Tag in getMicroserviceTag: %s", tag)
-
-	if tag != "" {
-		return tag
-	}
-
-	return "main"
 }
