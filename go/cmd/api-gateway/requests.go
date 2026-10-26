@@ -137,7 +137,8 @@ func processRequestApproval(jobId string, protoRequest *pb.RequestApproval, data
 		jobStore.Store(jobId, &jobStatus{Status: status, Result: result, Error: errMsg})
 	}
 
-	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Must exceed the policy enforcer's worst case (eFLINT acquire + sequential phrase evaluation)
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	ctx, span := trace.StartSpan(ctxWithTimeout, "requestApprovalHandler")
