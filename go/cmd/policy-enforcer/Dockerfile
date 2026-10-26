@@ -17,12 +17,21 @@ ARG EFLINT_TAG=v4.1.0.1
 
 RUN git clone --depth 1 --branch "${EFLINT_TAG}" "${EFLINT_REPO}" /tmp/eflint-project
 WORKDIR /tmp/eflint-project
+# The image's old cabal ships outdated Hackage root keys (haskell/cabal#12367); trust root.json fetched over HTTPS instead.
+# The repo is renamed because cabal forces its built-in keys on any repo named hackage.haskell.org.
+RUN cabal user-config init \
+    && sed -i -e 's|url: http://hackage.haskell.org/|url: https://hackage.haskell.org/|' \
+              -e 's|^repository hackage.haskell.org$|repository hackage|' \
+              -e '/^repository hackage$/a\  secure: True' /root/.cabal/config \
+    && grep -A3 '^repository' /root/.cabal/config
 RUN cabal update
 RUN cabal install
 RUN cp /root/.cabal/bin/eflint-server /usr/bin/eflint-server
 
-FROM golang:1.22.1-bullseye AS go-builder
+# Cross-compile Go natively on the build host instead of under QEMU emulation
+FROM --platform=$BUILDPLATFORM golang:1.22.1-bullseye AS go-builder
 ARG NAME
+ARG TARGETARCH
 ENV NAME=$NAME
 
 WORKDIR /app/cmd/$NAME
@@ -45,7 +54,7 @@ COPY go.sum /app
 COPY pkg /app/pkg
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /go/bin/$NAME .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -a -installsuffix cgo -o /go/bin/$NAME .
 
 FROM debian:bookworm-slim
 ARG NAME

@@ -9,8 +9,28 @@ dynamos_core := sidecar orchestrator agent api-gateway
 dynamos := $(dynamos_core) policy-enforcer
 # Docker Hub account for tagging and pushing images
 dockerhub_account := dynamos1
-# Platforms for multi-arch builds
-PLATFORMS ?= linux/arm64
+# Platforms for the policy-enforcer image: amd64 by default, amd64 + arm64 with MULTIARCH=true
+#
+# Building the dual (amd64 + arm64) image:
+# 	1. One-time: create a multi-platform builder (runs as a container, does not affect existing images)
+# 		docker buildx create --name multiarch --driver docker-container --use
+# 		docker buildx inspect --bootstrap
+# 	2. Check that linux/arm64 is in the platform list printed above. If not (Linux without Docker Desktop), install QEMU emulators:
+# 		docker run --privileged --rm tonistiigi/binfmt --install all
+# 	3. Log in and build (the arm64 eFLINT stage runs under emulation, so expect a long build):
+# 		docker login
+# 		make policy-enforcer MULTIARCH=true
+# 	4. Verify both architectures are published:
+# 		docker buildx imagetools inspect dynamos1/policy-enforcer:latest
+# 	5. Optional: switch back to the default builder / remove the multi-platform builder
+# 		docker buildx use default
+# 		docker buildx rm multiarch
+MULTIARCH ?= false
+ifeq ($(MULTIARCH),true)
+PLATFORMS ?= linux/amd64,linux/arm64
+else
+PLATFORMS ?= linux/amd64
+endif
 # eFLINT source for policy-enforcer
 EFLINT_REPO ?= https://gitlab.com/eflint/haskell-implementation.git
 EFLINT_TAG ?= v4.1.0.1
@@ -80,26 +100,13 @@ policy-enforcer: prepare proto
 	
 	(trap 'rm -f ./cmd/policy-enforcer/go.*; \
 			rm -rf ./cmd/policy-enforcer/pkg' EXIT; \
-		if [[ "$(PLATFORMS)" == *","* ]]; then \
-			(cd ./cmd/policy-enforcer && docker buildx build --platform $(PLATFORMS) --load \
-				--build-arg NAME='policy-enforcer' \
-				--build-arg EFLINT_REPO='$(EFLINT_REPO)' \
-				--build-arg EFLINT_TAG='$(EFLINT_TAG)' \
-				-t $(dockerhub_account)/policy-enforcer:$(branch_name) \
-				-t $(dockerhub_account)/policy-enforcer:latest \
-				-f Dockerfile .); \
-		else \
-			(cd ./cmd/policy-enforcer && docker buildx build --platform $(PLATFORMS) --load \
-				--build-arg NAME='policy-enforcer' \
-				--build-arg EFLINT_REPO='$(EFLINT_REPO)' \
-				--build-arg EFLINT_TAG='$(EFLINT_TAG)' \
-				-t $(dockerhub_account)/policy-enforcer:$(branch_name) \
-				-t $(dockerhub_account)/policy-enforcer:latest \
-				-f Dockerfile .); \
-		fi)
-
-	docker push $(dockerhub_account)/policy-enforcer:$(branch_name)
-	docker push $(dockerhub_account)/policy-enforcer:latest
+		cd ./cmd/policy-enforcer && docker buildx build --platform $(PLATFORMS) --push \
+			--build-arg NAME='policy-enforcer' \
+			--build-arg EFLINT_REPO='$(EFLINT_REPO)' \
+			--build-arg EFLINT_TAG='$(EFLINT_TAG)' \
+			-t $(dockerhub_account)/policy-enforcer:$(branch_name) \
+			-t $(dockerhub_account)/policy-enforcer:latest \
+			-f Dockerfile .)
 
 # Same as above, but for the SQL-based microservices
 $(sql_microservices): prepare proto

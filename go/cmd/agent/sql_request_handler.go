@@ -71,9 +71,9 @@ func sqlDataRequestHandler() http.HandlerFunc {
 		// work than the "all" (computeToData) role: it fans out to every dataProvider over
 		// RabbitMQ, each of which deploys its own k8s Job, on top of deploying its own job
 		// here — so it needs a longer budget than the single-provider "all" path.
-		requestTimeout := 30 * time.Second
+		requestTimeout := 60 * time.Second
 		if strings.EqualFold(compositionRequest.Role, "computeProvider") {
-			requestTimeout = 60 * time.Second
+			requestTimeout = 120 * time.Second
 		}
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, requestTimeout)
 		defer cancel()

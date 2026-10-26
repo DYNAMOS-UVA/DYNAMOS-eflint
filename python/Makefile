@@ -5,7 +5,7 @@ targets := sql-query
 # Path to datasets used by services (currently unused in this file)
 datasets := "../configuration/datasets/"
 # Replace slashes in the current Git branch name with dashes (e.g., issue/123 -> issue-123)
-branch_name := $(shell git rev-parse --abbrev-ref HEAD | sed 's#/#-#g')
+branch_name := eflint-policy-enforcer
 # Docker Hub account name used for tagging and pushing Docker images
 dockerhub_account := dynamos1
 
